@@ -4,27 +4,17 @@ export async function onRequest(context) {
 
   const parts = url.pathname.split("/").filter(Boolean);
 
-  // Nothing to inspect.
-  if (parts.length === 0) {
-    return context.next();
-  }
-
-  const first = parts[0];
-
   /*
-   * If the first path segment contains a dot,
-   * treat it as an explicit domain.
+   * Explicit domain mode:
    *
-   * /example.com/foo/bar
-   *        ↓
-   * https://example.com/foo/bar
+   * /example.com/path
+   * /www.example.com/path
    *
-   * /sub.example.com/api/test
-   *        ↓
-   * https://sub.example.com/api/test
+   * A "." in the first path segment means that the
+   * first segment is a domain rather than a GitHub user.
    */
-  if (first.includes(".")) {
-    const domain = first;
+  if (parts.length > 0 && parts[0].includes(".")) {
+    const domain = parts[0];
 
     const remainingParts = parts.slice(1);
     const remainingPath =
@@ -37,7 +27,6 @@ export async function onRequest(context) {
 
     const headers = new Headers(request.headers);
 
-    // Tell [[path]].js which domain to proxy to.
     headers.set("X-Proxy-Domain", domain);
 
     const rewrittenRequest = new Request(rewrittenUrl, {
@@ -53,9 +42,16 @@ export async function onRequest(context) {
   }
 
   /*
-   * No ".":
+   * Everything else is handled by [[path]].js.
    *
-   * Let [[path]].js handle normal GitHub-user logic.
+   * In particular:
+   *
+   * /foo
+   * /foo/bar
+   * /api/test
+   * /payload
+   *
+   * are NOT usernames.
    */
   return context.next();
 }

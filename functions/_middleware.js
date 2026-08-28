@@ -1,57 +1,61 @@
-export async function onRequest({ request }) {
+export async function onRequest(context) {
+  const { request } = context;
   const url = new URL(request.url);
-  const cookie = request.headers.get("Cookie") || "";
 
-  let user = cookie.match(/(?:^|;\s*)github_user=([^;]+)/)?.[1];
+  const parts = url.pathname.split("/").filter(Boolean);
 
-  // First visit: /username/anything
-  if (!user) {
-    const parts = url.pathname.split("/").filter(Boolean);
-
-    if (!parts.length) {
-      return new Response("Use /githubusername/path", { status: 400 });
-    }
-
-    user = parts.shift();
-
-    if (!/^[A-Za-z0-9-]+$/.test(user)) {
-      return new Response("Invalid GitHub username", { status: 400 });
-    }
-
-    const newPath = "/" + parts.join("/");
-
-    return new Response(null, {
-      status: 302,
-      headers: {
-        "Location": newPath + url.search,
-        "Set-Cookie":
-          `github_user=${user}; Path=/; Secure; SameSite=Lax`,
-      },
-    });
+  // Nothing to inspect.
+  if (parts.length === 0) {
+    return context.next();
   }
 
-  // Everything after the bootstrap redirect uses the
-  // remembered GitHub user as the upstream host.
-  const target = new URL(`https://${user}.github.io`);
-  target.pathname = url.pathname;
-  target.search = url.search;
+  const first = parts[0];
 
-  const headers = new Headers(request.headers);
-  headers.delete("Host");
+  /*
+   * If the first path segment contains a dot,
+   * treat it as an explicit domain.
+   *
+   * /example.com/foo/bar
+   *        ↓
+   * https://example.com/foo/bar
+   *
+   * /sub.example.com/api/test
+   *        ↓
+   * https://sub.example.com/api/test
+   */
+  if (first.includes(".")) {
+    const domain = first;
 
-  const upstream = await fetch(target, {
-    method: request.method,
-    headers,
-    body: ["GET", "HEAD"].includes(request.method)
-      ? undefined
-      : request.body,
-    redirect: "manual",
-  });
+    const remainingParts = parts.slice(1);
+    const remainingPath =
+      remainingParts.length > 0
+        ? "/" + remainingParts.join("/")
+        : "/";
 
-  // Pass the GitHub response straight back.
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: upstream.headers,
-  });
+    const rewrittenUrl = new URL(url);
+    rewrittenUrl.pathname = remainingPath;
+
+    const headers = new Headers(request.headers);
+
+    // Tell [[path]].js which domain to proxy to.
+    headers.set("X-Proxy-Domain", domain);
+
+    const rewrittenRequest = new Request(rewrittenUrl, {
+      method: request.method,
+      headers,
+      body: ["GET", "HEAD"].includes(request.method)
+        ? undefined
+        : request.body,
+      redirect: "manual",
+    });
+
+    return context.next(rewrittenRequest);
+  }
+
+  /*
+   * No ".":
+   *
+   * Let [[path]].js handle normal GitHub-user logic.
+   */
+  return context.next();
 }

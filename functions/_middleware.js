@@ -1,23 +1,17 @@
-export async function onRequest(context) {
-  const url = new URL(context.request.url);
+export async function onRequest({ request }) {
+  const url = new URL(request.url);
 
-  // https://GITHUBUSER@mysite.pages.dev/path?query
-  const user = url.username;
+  const data = {
+    request_url: request.url,
+    url_username: url.username,
+    url_password: url.password,
+    url_host: url.host,
+    url_path: url.pathname,
+    url_search: url.search,
+    headers: Object.fromEntries(request.headers),
+  };
 
-  if (!user) {
-    return new Response("Use https://GITHUBUSER@mysite.pages.dev/...", {
-      status: 400,
-    });
-  }
-
-  // Basic username validation
-  if (!/^[A-Za-z0-9-]+$/.test(user)) {
-    return new Response("Invalid GitHub username", { status: 400 });
-  }
-
-  const target = new URL(`https://${user}.github.io`);
-  target.pathname = url.pathname;
-  target.search = url.search;
-
-  return Response.redirect(target.toString(), 302);
-}
+  return new Response(JSON.stringify(data, null, 2), {
+    headers: { "content-type": "application/json" },
+  });
+}a

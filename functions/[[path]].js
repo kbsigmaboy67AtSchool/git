@@ -6,26 +6,22 @@ export async function onRequest({ request }) {
    * EXPLICIT DOMAIN MODE
    * =========================================================
    *
-   * The middleware detects:
+   * The middleware converts:
    *
    * /example.com/foo/bar
    *
-   * and changes it internally to:
+   * into:
    *
    * /foo/bar
    *
-   * while putting "example.com" in X-Proxy-Domain.
+   * and gives us the domain through X-Proxy-Domain.
    */
+
   const explicitDomain = request.headers.get("X-Proxy-Domain");
 
   if (explicitDomain) {
     /*
-     * Validate the domain before fetching it.
-     *
-     * Allows:
-     * example.com
-     * www.example.com
-     * api.example.co.uk
+     * Validate the domain.
      */
     if (
       !/^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/.test(
@@ -44,7 +40,6 @@ export async function onRequest({ request }) {
 
     const headers = new Headers(request.headers);
 
-    // Internal routing header must not reach the upstream server.
     headers.delete("X-Proxy-Domain");
     headers.delete("Host");
 
@@ -57,9 +52,6 @@ export async function onRequest({ request }) {
       redirect: "follow",
     });
 
-    /*
-     * Pass the upstream response back unchanged.
-     */
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
@@ -69,75 +61,97 @@ export async function onRequest({ request }) {
 
   /*
    * =========================================================
-   * GITHUB USER MODE
+   * USER SWITCH MODE
    * =========================================================
    *
-   * No "." in the first segment means normal username logic.
+   * ONLY /$/USERNAME changes the GitHub user.
    *
-   * /username/foo/bar
-   *       ↓
-   * https://username.github.io/foo/bar
+   * Examples:
+   *
+   * /$/kbsigmaboy67
+   * /$/kbsigmaboy67/foo
+   * /$/kbsigmaboy67/api/test
+   */
+
+  const parts = url.pathname.split("/").filter(Boolean);
+
+  if (parts[0] === "$") {
+    /*
+     * We need a username after "$".
+     */
+    if (!parts[1]) {
+      return new Response("Missing GitHub username", {
+        status: 400,
+      });
+    }
+
+    const user = parts[1];
+
+    /*
+     * GitHub usernames may contain letters, numbers and hyphens.
+     */
+    if (!/^[A-Za-z0-9-]+$/.test(user)) {
+      return new Response("Invalid GitHub username", {
+        status: 400,
+      });
+    }
+
+    /*
+     * Remove:
+     *
+     * /$/
+     * username
+     *
+     * leaving only the actual path.
+     */
+    const remainingParts = parts.slice(2);
+
+    const newPath =
+      remainingParts.length > 0
+        ? "/" + remainingParts.join("/")
+        : "/";
+
+    /*
+     * Store the selected user and redirect to the clean path.
+     *
+     * /$/kbsigmaboy67/foo
+     *
+     * becomes:
+     *
+     * /foo
+     *
+     * with github_user=kbsigmaboy67.
+     */
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: newPath + url.search,
+
+        "Set-Cookie":
+          `github_user=${encodeURIComponent(user)}; ` +
+          `Path=/; Secure; SameSite=Lax`,
+      },
+    });
+  }
+
+  /*
+   * =========================================================
+   * CURRENT USER MODE
+   * =========================================================
+   *
+   * Everything that isn't:
+   *
+   * /$/USERNAME
+   *
+   * uses the currently selected GitHub user.
    */
 
   const cookies = request.headers.get("Cookie") || "";
 
-  const cookieUser = cookies.match(
+  const user = cookies.match(
     /(?:^|;\s*)github_user=([^;]+)/
   )?.[1];
 
-  const parts = url.pathname.split("/").filter(Boolean);
-
-  let user = cookieUser;
-
-  /*
-   * If the first path component looks like a GitHub username,
-   * allow it to explicitly change the current user.
-   *
-   * This is what lets you switch users even when a cookie
-   * already exists.
-   *
-   * /newuser/foo
-   *       ↓
-   * github_user = newuser
-   *       ↓
-   * /foo
-   */
-  if (parts.length > 0) {
-    const possibleUser = parts[0];
-
-    if (
-      !possibleUser.includes(".") &&
-      /^[A-Za-z0-9-]+$/.test(possibleUser)
-    ) {
-      /*
-       * Treat the first component as a username when it is
-       * explicitly being supplied in the URL.
-       */
-      user = possibleUser;
-
-      parts.shift();
-
-      const newPath =
-        parts.length > 0
-          ? "/" + parts.join("/")
-          : "/";
-
-      return new Response(null, {
-        status: 302,
-        headers: {
-          Location: newPath + url.search,
-
-          "Set-Cookie":
-            `github_user=${encodeURIComponent(user)}; ` +
-            `Path=/; Secure; SameSite=Lax`,
-        },
-      });
-    }
-  }
-
-  /*
-   * No username was supplied in the URL and no cookie exists.
-   */
   if (!user) {
     return new Response("No GitHub user selected", {
       status: 400,
@@ -146,11 +160,13 @@ export async function onRequest({ request }) {
 
   /*
    * =========================================================
-   * PROXY TO GITHUB PAGES
+   * GITHUB PAGES PROXY
    * =========================================================
    *
    * /foo/bar
-   *     ↓
+   *
+   * becomes:
+   *
    * https://USER.github.io/foo/bar
    */
 

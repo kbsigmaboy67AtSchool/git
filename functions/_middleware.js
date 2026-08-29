@@ -1,4 +1,3 @@
-
 const SESSION_COOKIE = "n3xn_session";
 const SESSION_TTL = 60 * 60 * 24 * 30;
 
@@ -104,7 +103,9 @@ async function makeSignature(value, secret) {
   );
 
   return btoa(
-    String.fromCharCode(...new Uint8Array(signature)),
+    String.fromCharCode(
+      ...new Uint8Array(signature),
+    ),
   )
     .replaceAll("+", "-")
     .replaceAll("/", "_")
@@ -114,7 +115,8 @@ async function makeSignature(value, secret) {
 async function checkSession(request, secret) {
   if (!secret) return false;
 
-  const cookies = request.headers.get("Cookie") || "";
+  const cookies =
+    request.headers.get("Cookie") || "";
 
   const token = cookies.match(
     /(?:^|;\s*)n3xn_session=([^;]+)/,
@@ -122,13 +124,17 @@ async function checkSession(request, secret) {
 
   if (!token) return false;
 
-  const split = token.split(".");
+  const parts = token.split(".");
 
-  if (split.length !== 2) return false;
+  if (parts.length !== 2) {
+    return false;
+  }
 
-  const [expires, signature] = split;
+  const [expires, signature] = parts;
 
-  if (!/^\d+$/.test(expires)) return false;
+  if (!/^\d+$/.test(expires)) {
+    return false;
+  }
 
   if (
     Number(expires) <
@@ -137,17 +143,21 @@ async function checkSession(request, secret) {
     return false;
   }
 
-  const expected = await makeSignature(
-    expires,
-    secret,
-  );
+  const expected =
+    await makeSignature(
+      expires,
+      secret,
+    );
 
   return signature === expected;
 }
 
-function sessionCookie(expires, signature) {
+function sessionCookie(
+  expires,
+  signature,
+) {
   return [
-    `n3xn_session=${expires}.${signature}`,
+    `${SESSION_COOKIE}=${expires}.${signature}`,
     "Path=/",
     `Max-Age=${SESSION_TTL}`,
     "HttpOnly",
@@ -157,11 +167,18 @@ function sessionCookie(expires, signature) {
 }
 
 export async function onRequest(context) {
-  const { request, env } = context;
-  const url = new URL(request.url);
+  const {
+    request,
+    env,
+  } = context;
+
+  const url =
+    new URL(request.url);
 
   /*
-   * PUBLIC AUTH ROUTES
+   * ============================================================
+   * LOGIN
+   * ============================================================
    */
 
   if (url.pathname === "/login") {
@@ -170,28 +187,39 @@ export async function onRequest(context) {
     }
 
     if (request.method === "POST") {
-      const form = await request.formData();
-      const supplied = String(
-        form.get("password") || "",
-      );
+      const form =
+        await request.formData();
+
+      const supplied =
+        String(
+          form.get("password") || "",
+        );
 
       if (
         !env.N3XN_PASSWORD ||
-        supplied !== env.N3XN_PASSWORD
+        supplied !==
+          env.N3XN_PASSWORD
       ) {
-        return loginPage("Incorrect password.");
+        return loginPage(
+          "Incorrect password.",
+        );
       }
 
-      if (!env.N3XN_SESSION_SECRET) {
+      if (
+        !env.N3XN_SESSION_SECRET
+      ) {
         return new Response(
           "N3XN_SESSION_SECRET is missing.",
-          { status: 500 },
+          {
+            status: 500,
+          },
         );
       }
 
       const expires =
-        Math.floor(Date.now() / 1000) +
-        SESSION_TTL;
+        Math.floor(
+          Date.now() / 1000,
+        ) + SESSION_TTL;
 
       const signature =
         await makeSignature(
@@ -199,104 +227,212 @@ export async function onRequest(context) {
           env.N3XN_SESSION_SECRET,
         );
 
-      return new Response(null, {
-        status: 303,
-        headers: {
-          Location: "/",
-          "Set-Cookie": sessionCookie(
-            expires,
-            signature,
-          ),
+      return new Response(
+        null,
+        {
+          status: 303,
+          headers: {
+            Location: "/",
+            "Set-Cookie":
+              sessionCookie(
+                expires,
+                signature,
+              ),
+          },
         },
-      });
+      );
     }
 
     return new Response(
       "Method Not Allowed",
-      { status: 405 },
+      {
+        status: 405,
+      },
     );
   }
 
+  /*
+   * ============================================================
+   * LOGOUT
+   * ============================================================
+   */
+
   if (url.pathname === "/logout") {
-    return new Response(null, {
-      status: 303,
-      headers: {
-        Location: "/login",
-        "Set-Cookie":
-          "n3xn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
+    return new Response(
+      null,
+      {
+        status: 303,
+        headers: {
+          Location: "/login",
+          "Set-Cookie":
+            `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`,
+        },
       },
-    });
+    );
   }
 
   /*
-   * DEVTOOLS AUTH ENDPOINT IS HANDLED SEPARATELY.
+   * ============================================================
+   * DEVTOOLS AUTH
+   * ============================================================
+   *
+   * Let functions/devtools-auth.js handle this.
    */
 
-  if (url.pathname === "/devtools-auth") {
+  if (
+    url.pathname ===
+    "/devtools-auth"
+  ) {
     return context.next();
   }
 
   /*
-   * EVERYTHING ELSE REQUIRES THE APP LOGIN.
+   * ============================================================
+   * CHECK LOGIN
+   * ============================================================
    */
 
-  const authenticated = await checkSession(
-    request,
-    env.N3XN_SESSION_SECRET,
-  );
+  const authenticated =
+    await checkSession(
+      request,
+      env.N3XN_SESSION_SECRET,
+    );
 
   if (!authenticated) {
     return loginPage();
   }
 
-  const response = await context.next();
-
   /*
-   * Inject only into actual HTML documents/iframes.
-   *
-   * fetch()/XHR responses aren't injected.
+   * ============================================================
+   * RUN THE ACTUAL FUNCTION
+   * ============================================================
    */
 
-  const destination =
-    request.headers.get("Sec-Fetch-Dest") || "";
+  const response =
+    await context.next();
+
+  /*
+   * ============================================================
+   * DEVTOOLS INJECTION
+   * ============================================================
+   *
+   * We intentionally don't depend on
+   * Sec-Fetch-Dest here.
+   *
+   * Only responses whose Content-Type
+   * explicitly says HTML are modified.
+   *
+   * This means JSON, JS, CSS, images,
+   * API responses, etc. aren't injected.
+   */
 
   const contentType =
-    response.headers.get("Content-Type") || "";
-
-  const isDocument =
-    destination === "document" ||
-    destination === "iframe";
+    response.headers.get(
+      "Content-Type",
+    ) || "";
 
   const isHTML =
     contentType
       .toLowerCase()
       .includes("text/html");
 
-  if (isDocument && isHTML) {
-    const body = await response.text();
-
-    const injection =
-      `<script src="/devtools.js" defer></script>`;
-
-    const output =
-      /<\/body>/i.test(body)
-        ? body.replace(
-            /<\/body>/i,
-            `${injection}</body>`,
-          )
-        : body + injection;
-
-    const headers =
-      new Headers(response.headers);
-
-    headers.delete("Content-Length");
-
-    return new Response(output, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    });
+  if (!isHTML) {
+    return response;
   }
 
-  return response;
+  /*
+   * Don't inject DevTools into the
+   * DevTools script itself.
+   */
+
+  if (
+    url.pathname ===
+    "/devtools.js"
+  ) {
+    return response;
+  }
+
+  let body;
+
+  try {
+    body =
+      await response.text();
+  } catch {
+    return response;
+  }
+
+  /*
+   * IMPORTANT:
+   *
+   * Use the actual n3xn deployment origin.
+   * This prevents /devtools.js from being
+   * interpreted relative to the proxied site.
+   */
+
+  const devtoolsURL =
+    new URL(
+      "/devtools.js",
+      request.url,
+    ).href;
+
+  const injection =
+    `<script src="${devtoolsURL}" defer></script>`;
+
+  /*
+   * Insert before </body> whenever possible.
+   */
+
+  if (
+    /<\/body\s*>/i.test(body)
+  ) {
+    body =
+      body.replace(
+        /<\/body\s*>/i,
+        `${injection}</body>`,
+      );
+  } else if (
+    /<\/html\s*>/i.test(body)
+  ) {
+    body =
+      body.replace(
+        /<\/html\s*>/i,
+        `${injection}</html>`,
+      );
+  } else {
+    body += injection;
+  }
+
+  const headers =
+    new Headers(
+      response.headers,
+    );
+
+  /*
+   * The body length changed.
+   */
+
+  headers.delete(
+    "Content-Length",
+  );
+
+  /*
+   * The response is now decoded text,
+   * so don't leave an old compression
+   * header referring to the original body.
+   */
+
+  headers.delete(
+    "Content-Encoding",
+  );
+
+  return new Response(
+    body,
+    {
+      status:
+        response.status,
+      statusText:
+        response.statusText,
+      headers,
+    },
+  );
 }

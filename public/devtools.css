@@ -1,0 +1,309 @@
+```css
+.n3xn-devtools-root {
+  position: fixed;
+  z-index: 2147483647;
+  right: 14px;
+  bottom: 14px;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+}
+
+.n3xn-devtools-launcher {
+  width: 38px;
+  height: 38px;
+
+  border: 1px solid #454b54;
+  border-radius: 8px;
+
+  background: #202124;
+  color: #fff;
+
+  cursor: grab;
+
+  box-shadow:
+    0 4px 16px rgba(0,0,0,.45);
+
+  display: grid;
+  place-items: center;
+
+  user-select: none;
+}
+
+.n3xn-devtools-launcher:active {
+  cursor: grabbing;
+}
+
+.n3xn-devtools-window {
+  position: fixed;
+
+  left: 0;
+  right: 0;
+  bottom: 0;
+
+  height: min(70vh, 680px);
+
+  display: none;
+
+  grid-template-rows:
+    32px
+    36px
+    1fr;
+
+  background: #202124;
+  color: #e8eaed;
+
+  border-top: 1px solid #4b4f55;
+
+  box-shadow:
+    0 -10px 35px rgba(0,0,0,.55);
+
+  z-index: 2147483646;
+
+  font-size: 12px;
+}
+
+.n3xn-devtools-window.n3xn-open {
+  display: grid;
+}
+
+.n3xn-devtools-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 0 10px;
+
+  background: #292a2d;
+
+  border-bottom: 1px solid #454545;
+}
+
+.n3xn-devtools-title {
+  font-weight: 600;
+  margin-right: auto;
+}
+
+.n3xn-devtools-button {
+  border: 0;
+  background: transparent;
+  color: #aaa;
+
+  padding: 5px 8px;
+
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.n3xn-devtools-button:hover {
+  background: #3a3b3e;
+  color: #fff;
+}
+
+.n3xn-devtools-tabs {
+  display: flex;
+  align-items: stretch;
+
+  overflow-x: auto;
+
+  background: #292a2d;
+  border-bottom: 1px solid #454545;
+}
+
+.n3xn-devtools-tab {
+  border: 0;
+
+  background: transparent;
+  color: #aaa;
+
+  padding: 0 14px;
+
+  cursor: pointer;
+
+  white-space: nowrap;
+}
+
+.n3xn-devtools-tab:hover {
+  color: #eee;
+  background: #323336;
+}
+
+.n3xn-devtools-tab.n3xn-active {
+  color: #fff;
+
+  box-shadow:
+    inset 0 -2px #8ab4f8;
+}
+
+.n3xn-devtools-content {
+  min-height: 0;
+
+  display: grid;
+
+  grid-template-columns:
+    minmax(0, 1fr)
+    330px;
+}
+
+.n3xn-devtools-main {
+  min-width: 0;
+  min-height: 0;
+
+  overflow: auto;
+
+  background: #1e1e1e;
+}
+
+.n3xn-devtools-sidebar {
+  min-width: 0;
+
+  overflow: auto;
+
+  padding: 10px;
+
+  border-left: 1px solid #454545;
+
+  background: #202124;
+}
+
+.n3xn-devtools-editor {
+  width: 100%;
+  height: 100%;
+}
+
+.n3xn-devtools-pre {
+  margin: 0;
+  padding: 12px;
+
+  white-space: pre-wrap;
+  word-break: break-word;
+
+  font-family:
+    "SFMono-Regular",
+    Consolas,
+    "Liberation Mono",
+    monospace;
+
+  font-size: 12px;
+
+  color: #ddd;
+}
+
+.n3xn-devtools-field {
+  display: block;
+  width: 100%;
+
+  box-sizing: border-box;
+
+  margin:
+    4px 0 10px;
+
+  padding: 8px;
+
+  border:
+    1px solid #444;
+
+  border-radius: 4px;
+
+  background: #151515;
+  color: #eee;
+
+  outline: none;
+}
+
+.n3xn-devtools-field:focus {
+  border-color: #8ab4f8;
+}
+
+.n3xn-devtools-action {
+  padding: 7px 10px;
+
+  border:
+    1px solid #555;
+
+  border-radius: 4px;
+
+  background: #303134;
+  color: #eee;
+
+  cursor: pointer;
+}
+
+.n3xn-devtools-action:hover {
+  background: #3c4043;
+}
+
+.n3xn-devtools-console {
+  height: 100%;
+
+  display: flex;
+  flex-direction: column;
+}
+
+.n3xn-devtools-console-output {
+  flex: 1;
+
+  overflow: auto;
+
+  padding: 6px;
+
+  font-family: monospace;
+}
+
+.n3xn-devtools-console-line {
+  padding: 5px 7px;
+
+  border-bottom:
+    1px solid #303030;
+
+  white-space: pre-wrap;
+}
+
+.n3xn-devtools-console-input {
+  width: 100%;
+  min-height: 70px;
+
+  resize: vertical;
+
+  box-sizing: border-box;
+
+  border: 0;
+  border-top: 1px solid #454545;
+
+  padding: 9px;
+
+  outline: none;
+
+  background: #111;
+  color: #eee;
+
+  font:
+    12px monospace;
+}
+
+.n3xn-devtools-network-row {
+  padding: 7px 10px;
+
+  border-bottom:
+    1px solid #333;
+
+  font-family: monospace;
+
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media(max-width:800px) {
+  .n3xn-devtools-content {
+    grid-template-columns: 1fr;
+  }
+
+  .n3xn-devtools-sidebar {
+    display: none;
+  }
+}
+```

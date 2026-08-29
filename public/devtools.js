@@ -59,6 +59,23 @@
       headerRules: true,
       attrRules: true,
       devAuthenticated: true,
+      clicker: true,
+    },
+    clicker: {
+      enabled: false,
+      cps: 10,
+      button: 0,           // 0 left, 1 middle, 2 right
+      mode: "cursor",      // cursor | fixed | selector | hold
+      x: 0,
+      y: 0,
+      selector: "",
+      hotkey: "F8",
+      jitter: 0,           // px random offset
+      burst: 0,            // 0 = infinite, else max clicks per run
+      holdKey: false,      // only click while hotkey held (mode hold uses this)
+      visibleOnly: true,
+      pointerEvents: true, // also dispatch pointer*
+      delayStart: 0,       // ms before first click after start
     },
   };
 
@@ -128,6 +145,8 @@
         state.headerRules = Array.isArray(state.headerRules) ? state.headerRules : [];
         state.attrRules = Array.isArray(state.attrRules) ? state.attrRules : [];
         state.scripts = Array.isArray(state.scripts) ? state.scripts : [];
+        if (!state.clicker || typeof state.clicker !== "object") state.clicker = clickerDefaults();
+        else state.clicker = Object.assign(clickerDefaults(), state.clicker);
       }
     } catch (err) {
       console.warn("n3xn DevTools loadState failed", err);
@@ -155,6 +174,8 @@
       if (flags.headerRules === false) toSave.headerRules = [];
       if (flags.attrRules === false) toSave.attrRules = [];
       if (flags.devAuthenticated === false) toSave.devAuthenticated = false;
+      if (flags.clicker === false) toSave.clicker = state.clicker; // still save structure; user flag for "remember"
+
 
       // Always keep arrays defined
       toSave.htmlPatches = toSave.htmlPatches || [];
@@ -1456,6 +1477,443 @@
 
 
 
+
+  /* ── Auto clicker (in-page) ── */
+
+  let clickerTimer = null;
+  let clickerCount = 0;
+  let clickerRunning = false;
+  let clickerHotkeyHeld = false;
+
+  function clickerDefaults() {
+    return {
+      enabled: false,
+      cps: 10,
+      button: 0,
+      mode: "cursor",
+      x: 0,
+      y: 0,
+      selector: "",
+      hotkey: "F8",
+      jitter: 0,
+      burst: 0,
+      holdKey: false,
+      visibleOnly: true,
+      pointerEvents: true,
+      delayStart: 0,
+    };
+  }
+
+  function getClicker() {
+    if (!state.clicker || typeof state.clicker !== "object") {
+      state.clicker = clickerDefaults();
+    }
+    return state.clicker;
+  }
+
+  function clickerButtonName(btn) {
+    return btn === 1 ? "middle" : btn === 2 ? "right" : "left";
+  }
+
+  function resolveClickPoint() {
+    const c = getClicker();
+    let x = 0;
+    let y = 0;
+    let target = null;
+
+    if (c.mode === "fixed") {
+      x = Number(c.x) || 0;
+      y = Number(c.y) || 0;
+      target = document.elementFromPoint(x, y);
+    } else if (c.mode === "selector" && c.selector) {
+      try {
+        target = document.querySelector(c.selector);
+      } catch {
+        target = null;
+      }
+      if (target && target.getBoundingClientRect) {
+        const r = target.getBoundingClientRect();
+        x = r.left + r.width / 2;
+        y = r.top + r.height / 2;
+      }
+    } else {
+      // cursor — last known mouse position
+      x = window.__n3xnMouseX || 0;
+      y = window.__n3xnMouseY || 0;
+      target = document.elementFromPoint(x, y);
+    }
+
+    const jit = Math.max(0, Number(c.jitter) || 0);
+    if (jit) {
+      x += (Math.random() * 2 - 1) * jit;
+      y += (Math.random() * 2 - 1) * jit;
+      target = document.elementFromPoint(x, y) || target;
+    }
+    return { x, y, target };
+  }
+
+  function fireSyntheticClick() {
+    const c = getClicker();
+    if (c.visibleOnly && document.visibilityState === "hidden") return false;
+
+    if (c.mode === "hold" || c.holdKey) {
+      if (!clickerHotkeyHeld && c.mode === "hold") return false;
+    }
+
+    const { x, y, target } = resolveClickPoint();
+    if (!target) return false;
+
+    const btn = Number(c.button) || 0;
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      screenX: x + (window.screenX || 0),
+      screenY: y + (window.screenY || 0),
+      button: btn,
+      buttons: btn === 0 ? 1 : btn === 1 ? 4 : 2,
+      detail: 1,
+    };
+
+    try {
+      if (c.pointerEvents && typeof PointerEvent === "function") {
+        target.dispatchEvent(new PointerEvent("pointerdown", { ...opts, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+      }
+      target.dispatchEvent(new MouseEvent("mousedown", opts));
+      if (c.pointerEvents && typeof PointerEvent === "function") {
+        target.dispatchEvent(new PointerEvent("pointerup", { ...opts, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+      }
+      target.dispatchEvent(new MouseEvent("mouseup", opts));
+      target.dispatchEvent(new MouseEvent("click", opts));
+      if (btn === 2) {
+        target.dispatchEvent(new MouseEvent("contextmenu", opts));
+      }
+      clickerCount++;
+      return true;
+    } catch (err) {
+      console.warn("n3xn clicker", err);
+      return false;
+    }
+  }
+
+  function stopClicker() {
+    clickerRunning = false;
+    if (clickerTimer) {
+      clearInterval(clickerTimer);
+      clickerTimer = null;
+    }
+    const c = getClicker();
+    c.enabled = false;
+  }
+
+  function startClicker() {
+    stopClicker();
+    const c = getClicker();
+    c.enabled = true;
+    clickerRunning = true;
+    clickerCount = 0;
+
+    const cps = Math.max(0.2, Math.min(100, Number(c.cps) || 10));
+    const interval = Math.max(10, Math.round(1000 / cps));
+    const delay = Math.max(0, Number(c.delayStart) || 0);
+    const burst = Math.max(0, Number(c.burst) || 0);
+
+    const tick = () => {
+      if (!clickerRunning) return;
+      if (burst > 0 && clickerCount >= burst) {
+        stopClicker();
+        return;
+      }
+      fireSyntheticClick();
+    };
+
+    if (delay > 0) {
+      setTimeout(() => {
+        if (!clickerRunning) return;
+        tick();
+        clickerTimer = setInterval(tick, interval);
+      }, delay);
+    } else {
+      tick();
+      clickerTimer = setInterval(tick, interval);
+    }
+  }
+
+  function toggleClicker() {
+    if (clickerRunning) stopClicker();
+    else startClicker();
+  }
+
+  function installClickerHooks() {
+    if (window[`${NS}clickerHooks`]) return;
+    window[`${NS}clickerHooks`] = true;
+
+    window.__n3xnMouseX = 0;
+    window.__n3xnMouseY = 0;
+
+    window.addEventListener(
+      "mousemove",
+      (e) => {
+        window.__n3xnMouseX = e.clientX;
+        window.__n3xnMouseY = e.clientY;
+      },
+      true,
+    );
+
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        const c = getClicker();
+        const hk = (c.hotkey || "F8").toLowerCase();
+        const key = (e.key || "").toLowerCase();
+        const code = (e.code || "").toLowerCase();
+        const match =
+          key === hk ||
+          code === hk ||
+          code === `key${hk}` ||
+          (hk.length === 1 && key === hk);
+
+        if (!match) return;
+        // don't steal typing from inputs unless it's a function key
+        const tag = (e.target && e.target.tagName) || "";
+        if (!/^f\d+$/i.test(c.hotkey || "") && /INPUT|TEXTAREA|SELECT/.test(tag)) {
+          return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (c.mode === "hold" || c.holdKey) {
+          clickerHotkeyHeld = true;
+          if (!clickerRunning) startClicker();
+        } else {
+          toggleClicker();
+        }
+      },
+      true,
+    );
+
+    window.addEventListener(
+      "keyup",
+      (e) => {
+        const c = getClicker();
+        const hk = (c.hotkey || "F8").toLowerCase();
+        const key = (e.key || "").toLowerCase();
+        const code = (e.code || "").toLowerCase();
+        const match = key === hk || code === hk || code === `key${hk}`;
+        if (!match) return;
+        if (c.mode === "hold" || c.holdKey) {
+          clickerHotkeyHeld = false;
+          stopClicker();
+        }
+      },
+      true,
+    );
+  }
+
+  function showClicker() {
+    currentTab = "Clicker";
+    clear(main);
+    clear(detail);
+    detail.style.display = "";
+    installClickerHooks();
+
+    const c = getClicker();
+
+    const wrap = el("div", { className: `${NS}settings` });
+    main.appendChild(wrap);
+
+    const status = el("div", { className: `${NS}side-heading` });
+    const updateStatus = () => {
+      status.textContent = clickerRunning
+        ? `RUNNING · ${clickerCount} clicks · ${c.cps} CPS`
+        : `Stopped · hotkey ${c.hotkey || "F8"}`;
+      status.style.color = clickerRunning ? "#81c995" : "#9aa0a6";
+    };
+    updateStatus();
+    wrap.appendChild(status);
+
+    const row = (label, node) => {
+      wrap.appendChild(el("div", { className: `${NS}label` }, label));
+      wrap.appendChild(node);
+    };
+
+    const cps = el("input", {
+      className: `${NS}input`,
+      type: "number",
+      min: "0.2",
+      max: "100",
+      step: "0.5",
+      value: String(c.cps),
+    });
+    row("Clicks per second (CPS)", cps);
+
+    const btn = el("select", { className: `${NS}select` });
+    for (const [v, lab] of [
+      [0, "Left"],
+      [1, "Middle"],
+      [2, "Right"],
+    ]) {
+      const o = el("option", { value: String(v) }, lab);
+      if (c.button === v) o.selected = true;
+      btn.appendChild(o);
+    }
+    row("Mouse button", btn);
+
+    const mode = el("select", { className: `${NS}select` });
+    for (const m of [
+      ["cursor", "Follow cursor"],
+      ["fixed", "Fixed coordinates"],
+      ["selector", "CSS selector (element center)"],
+      ["hold", "Hold hotkey (click at cursor while held)"],
+    ]) {
+      const o = el("option", { value: m[0] }, m[1]);
+      if (c.mode === m[0]) o.selected = true;
+      mode.appendChild(o);
+    }
+    row("Target mode", mode);
+
+    const xy = el("div", { style: { display: "flex", gap: "8px", maxWidth: "480px" } });
+    const xin = el("input", { className: `${NS}input`, type: "number", value: String(c.x), placeholder: "X", style: { margin: "0", flex: "1" } });
+    const yin = el("input", { className: `${NS}input`, type: "number", value: String(c.y), placeholder: "Y", style: { margin: "0", flex: "1" } });
+    const pick = el("button", { className: `${NS}action`, style: { margin: "0" } }, "Pick point");
+    xy.append(xin, yin, pick);
+    row("Fixed X / Y (viewport)", xy);
+
+    pick.onclick = () => {
+      pick.textContent = "Click on page…";
+      const once = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        xin.value = String(Math.round(e.clientX));
+        yin.value = String(Math.round(e.clientY));
+        window.removeEventListener("click", once, true);
+        pick.textContent = "Pick point";
+      };
+      setTimeout(() => window.addEventListener("click", once, true), 50);
+    };
+
+    const sel = el("input", {
+      className: `${NS}input`,
+      value: c.selector || "",
+      placeholder: "e.g. #play, .cookie, canvas",
+    });
+    row("CSS selector", sel);
+
+    const hotkey = el("input", {
+      className: `${NS}input`,
+      value: c.hotkey || "F8",
+      placeholder: "F8",
+    });
+    row("Toggle / hold hotkey", hotkey);
+
+    const jitter = el("input", {
+      className: `${NS}input`,
+      type: "number",
+      min: "0",
+      max: "50",
+      value: String(c.jitter || 0),
+    });
+    row("Jitter (px random offset)", jitter);
+
+    const burst = el("input", {
+      className: `${NS}input`,
+      type: "number",
+      min: "0",
+      value: String(c.burst || 0),
+    });
+    row("Burst limit (0 = infinite)", burst);
+
+    const delay = el("input", {
+      className: `${NS}input`,
+      type: "number",
+      min: "0",
+      value: String(c.delayStart || 0),
+    });
+    row("Start delay (ms)", delay);
+
+    const mkToggle = (key, label, checked) => {
+      const lab = el("label", { className: `${NS}toggle` });
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = !!checked;
+      lab.append(cb, document.createTextNode(" " + label));
+      wrap.appendChild(lab);
+      return cb;
+    };
+
+    const vis = mkToggle("visibleOnly", "Only click when tab is visible", c.visibleOnly !== false);
+    const ptr = mkToggle("pointerEvents", "Dispatch pointer events too", c.pointerEvents !== false);
+    const hold = mkToggle("holdKey", "Also require hotkey held in non-hold modes", c.holdKey);
+
+    const actions = el("div", { style: { marginTop: "12px" } });
+    const startBtn = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Start");
+    const stopBtn = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Stop");
+    const saveBtn = el("button", { className: `${NS}action` }, "Save settings");
+    actions.append(startBtn, stopBtn, saveBtn);
+    wrap.appendChild(actions);
+
+    const readForm = () => {
+      c.cps = Math.max(0.2, Math.min(100, Number(cps.value) || 10));
+      c.button = Number(btn.value) || 0;
+      c.mode = mode.value;
+      c.x = Number(xin.value) || 0;
+      c.y = Number(yin.value) || 0;
+      c.selector = sel.value.trim();
+      c.hotkey = hotkey.value.trim() || "F8";
+      c.jitter = Math.max(0, Number(jitter.value) || 0);
+      c.burst = Math.max(0, Number(burst.value) || 0);
+      c.delayStart = Math.max(0, Number(delay.value) || 0);
+      c.visibleOnly = vis.checked;
+      c.pointerEvents = ptr.checked;
+      c.holdKey = hold.checked;
+    };
+
+    startBtn.onclick = () => {
+      readForm();
+      startClicker();
+      updateStatus();
+    };
+    stopBtn.onclick = () => {
+      stopClicker();
+      updateStatus();
+    };
+    saveBtn.onclick = async () => {
+      readForm();
+      await saveState();
+      updateStatus();
+    };
+
+    // live status poll
+    const poll = setInterval(() => {
+      if (currentTab !== "Clicker") {
+        clearInterval(poll);
+        return;
+      }
+      updateStatus();
+    }, 250);
+
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, "Auto clicker"));
+    detail.appendChild(
+      el(
+        "div",
+        { className: `${NS}side-text` },
+        "Sends synthetic mouse/pointer events to the page (same tab only). " +
+          "Default hotkey F8 toggles. Hold mode clicks at the cursor while the key is held. " +
+          "Some games ignore synthetic events or use their own input systems.",
+      ),
+    );
+    detail.appendChild(
+      el(
+        "div",
+        { className: `${NS}side-text` },
+        `Button: ${clickerButtonName(c.button)} · Mode: ${c.mode}`,
+      ),
+    );
+  }
+
+
   function showPersist() {
     currentTab = "Persist";
     clear(main);
@@ -2153,6 +2611,7 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
       case "Sources": showSources(); break;
       case "Network": showNetwork(); break;
       case "Application": showApplication(); break;
+      case "Clicker": showClicker(); break;
       case "Persist": showPersist(); break;
       case "Settings": showSettings(); break;
       default: showElements();
@@ -2250,6 +2709,7 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
     loadCSS();
     installNetworkIntercept();
     installStorageHooks();
+    installClickerHooks();
     captureConsole();
 
     // CSS variable for page push
@@ -2275,7 +2735,7 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
     const titlebar = el("div", { className: `${NS}titlebar` });
 
     const tabbar = el("div", { className: `${NS}tabs` });
-    const tabNames = ["Elements", "Console", "Sources", "Network", "Application", "Persist", "Settings"];
+    const tabNames = ["Elements", "Console", "Sources", "Network", "Application", "Clicker", "Persist", "Settings"];
     for (const tabName of tabNames) {
       const button = el("button", { className: `${NS}tab`, type: "button" }, tabName);
       button.dataset.tab = tabName;

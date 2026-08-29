@@ -1,6 +1,9 @@
 const SESSION_COOKIE = "n3xn_session";
 const SESSION_TTL = 60 * 60 * 24 * 30;
 
+const DEVTOOLS_SCRIPT =
+  "https://kbsigmaboy67atschool.github.io/git/devtools.js";
+
 function loginPage(error = "") {
   return new Response(
     `<!doctype html>
@@ -118,9 +121,10 @@ async function checkSession(request, secret) {
   const cookies =
     request.headers.get("Cookie") || "";
 
-  const token = cookies.match(
-    /(?:^|;\s*)n3xn_session=([^;]+)/,
-  )?.[1];
+  const token =
+    cookies.match(
+      /(?:^|;\s*)n3xn_session=([^;]+)/,
+    )?.[1];
 
   if (!token) return false;
 
@@ -176,9 +180,7 @@ export async function onRequest(context) {
     new URL(request.url);
 
   /*
-   * ============================================================
    * LOGIN
-   * ============================================================
    */
 
   if (url.pathname === "/login") {
@@ -252,9 +254,7 @@ export async function onRequest(context) {
   }
 
   /*
-   * ============================================================
    * LOGOUT
-   * ============================================================
    */
 
   if (url.pathname === "/logout") {
@@ -272,24 +272,17 @@ export async function onRequest(context) {
   }
 
   /*
-   * ============================================================
    * DEVTOOLS AUTH
-   * ============================================================
-   *
-   * Let functions/devtools-auth.js handle this.
    */
 
   if (
-    url.pathname ===
-    "/devtools-auth"
+    url.pathname === "/devtools-auth"
   ) {
     return context.next();
   }
 
   /*
-   * ============================================================
-   * CHECK LOGIN
-   * ============================================================
+   * REQUIRE NORMAL LOGIN
    */
 
   const authenticated =
@@ -303,27 +296,14 @@ export async function onRequest(context) {
   }
 
   /*
-   * ============================================================
    * RUN THE ACTUAL FUNCTION
-   * ============================================================
    */
 
   const response =
     await context.next();
 
   /*
-   * ============================================================
-   * DEVTOOLS INJECTION
-   * ============================================================
-   *
-   * We intentionally don't depend on
-   * Sec-Fetch-Dest here.
-   *
-   * Only responses whose Content-Type
-   * explicitly says HTML are modified.
-   *
-   * This means JSON, JS, CSS, images,
-   * API responses, etc. aren't injected.
+   * ONLY MODIFY HTML
    */
 
   const contentType =
@@ -341,8 +321,7 @@ export async function onRequest(context) {
   }
 
   /*
-   * Don't inject DevTools into the
-   * DevTools script itself.
+   * Don't inject into the script itself.
    */
 
   if (
@@ -362,24 +341,14 @@ export async function onRequest(context) {
   }
 
   /*
-   * IMPORTANT:
-   *
-   * Use the actual n3xn deployment origin.
-   * This prevents /devtools.js from being
-   * interpreted relative to the proxied site.
+   * ABSOLUTE GITHUB PAGES SCRIPT
    */
 
-  const devtoolsURL =
-    new URL(
-      "/devtools.js",
-      request.url,
-    ).href;
-
   const injection =
-    `<script src="${devtoolsURL}" defer></script>`;
+    `<script src="${DEVTOOLS_SCRIPT}" defer></script>`;
 
   /*
-   * Insert before </body> whenever possible.
+   * Put it inside the document when possible.
    */
 
   if (
@@ -408,21 +377,32 @@ export async function onRequest(context) {
     );
 
   /*
-   * The body length changed.
+   * Body was changed.
    */
 
   headers.delete(
     "Content-Length",
   );
 
+  headers.delete(
+    "Content-Encoding",
+  );
+
   /*
-   * The response is now decoded text,
-   * so don't leave an old compression
-   * header referring to the original body.
+   * The proxied site may have a CSP that
+   * blocks GitHub Pages scripts.
+   *
+   * Remove the response CSP so the
+   * explicitly injected DevTools script
+   * can execute.
    */
 
   headers.delete(
-    "Content-Encoding",
+    "Content-Security-Policy",
+  );
+
+  headers.delete(
+    "Content-Security-Policy-Report-Only",
   );
 
   return new Response(

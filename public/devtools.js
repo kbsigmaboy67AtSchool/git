@@ -700,83 +700,560 @@
 
   /* ── Application ── */
 
+
+  /* ── Storage write attribution ── */
+
+  const storageAttribution = Object.create(null);
+  // key: "localStorage:foo" | "sessionStorage:bar" | "cookie:name"
+  // value: { stack, via, time, valuePreview }
+
+  function recordAttr(kind, key, value, via) {
+    let stack = "";
+    try {
+      const err = new Error();
+      stack = (err.stack || "")
+        .split("\n")
+        .slice(3, 10)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.includes("devtools.js") && !l.includes("__n3xn_"))
+        .join("\n");
+    } catch {}
+    storageAttribution[`${kind}:${key}`] = {
+      stack: stack || "(no stack)",
+      via: via || kind,
+      time: Date.now(),
+      valuePreview: String(value).slice(0, 200),
+    };
+  }
+
+  function installStorageHooks() {
+    if (window[`${NS}storageHooks`]) return;
+    window[`${NS}storageHooks`] = true;
+
+    const wrapStore = (store, kind) => {
+      const origSet = store.setItem.bind(store);
+      const origRemove = store.removeItem.bind(store);
+      const origClear = store.clear.bind(store);
+      store.setItem = function (key, value) {
+        recordAttr(kind, String(key), value, `${kind}.setItem`);
+        return origSet(key, value);
+      };
+      store.removeItem = function (key) {
+        delete storageAttribution[`${kind}:${key}`];
+        return origRemove(key);
+      };
+      store.clear = function () {
+        for (const k of Object.keys(storageAttribution)) {
+          if (k.startsWith(kind + ":")) delete storageAttribution[k];
+        }
+        return origClear();
+      };
+    };
+
+    try { wrapStore(localStorage, "localStorage"); } catch {}
+    try { wrapStore(sessionStorage, "sessionStorage"); } catch {}
+
+    // document.cookie setter
+    try {
+      const desc = Object.getOwnPropertyDescriptor(Document.prototype, "cookie")
+        || Object.getOwnPropertyDescriptor(HTMLDocument.prototype, "cookie");
+      if (desc && desc.set) {
+        const origSet = desc.set;
+        const origGet = desc.get;
+        Object.defineProperty(document, "cookie", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            return origGet.call(this);
+          },
+          set(v) {
+            try {
+              const name = String(v).split("=")[0].trim();
+              recordAttr("cookie", name, v, "document.cookie =");
+            } catch {}
+            return origSet.call(this, v);
+          },
+        });
+      }
+    } catch {}
+  }
+
+
   function showApplication() {
     currentTab = "Application";
     clear(main);
     clear(detail);
     detail.style.display = "";
+    installStorageHooks();
 
     const toolbar = el("div", { className: `${NS}toolbar` });
-    const select = el("select", { className: `${NS}select`, style: { margin: "0", width: "auto", minWidth: "130px" } });
-    for (const opt of ["localStorage", "sessionStorage", "cookies"]) {
+    const select = el("select", {
+      className: `${NS}select`,
+      style: { margin: "0", width: "auto", minWidth: "150px" },
+    });
+    for (const opt of [
+      "localStorage",
+      "sessionStorage",
+      "cookies",
+      "JS variables",
+    ]) {
       select.appendChild(el("option", { value: opt }, opt));
     }
-    const clearBtn = el("button", { className: `${NS}action`, style: { margin: "0" }, dataset: { danger: "1" } }, "Clear all");
-    toolbar.append(select, clearBtn);
+
+    const addBtn = el("button", { className: `${NS}action`, style: { margin: "0" } }, "Add / Set");
+    const clearBtn = el(
+      "button",
+      { className: `${NS}action`, style: { margin: "0" }, dataset: { danger: "1" } },
+      "Clear all",
+    );
+    const search = el("input", {
+      className: `${NS}search`,
+      placeholder: "Filter…",
+      style: { maxWidth: "180px" },
+    });
+    toolbar.append(select, search, addBtn, clearBtn);
     main.appendChild(toolbar);
 
     const list = el("div", { className: `${NS}storage-list` });
     main.appendChild(list);
 
-    const render = () => {
+    function attrFor(kind, key) {
+      return storageAttribution[`${kind}:${key}`] || null;
+    }
+
+    function showAttr(kind, key, value) {
+      clear(detail);
+      detail.appendChild(el("div", { className: `${NS}side-heading` }, `${kind} · ${key}`));
+      detail.appendChild(
+        el("div", { className: `${NS}side-text` }, String(value).slice(0, 500)),
+      );
+
+      const a = attrFor(kind, key);
+      detail.appendChild(el("div", { className: `${NS}side-heading` }, "Written by"));
+      if (a) {
+        detail.appendChild(
+          el(
+            "div",
+            { className: `${NS}side-text` },
+            `${a.via}\n${new Date(a.time).toLocaleString()}\n\n${a.stack}`,
+          ),
+        );
+      } else {
+        detail.appendChild(
+          el(
+            "div",
+            { className: `${NS}side-text` },
+            "Unknown — set before DevTools hooks, by HTTP Set-Cookie, or outside this page.",
+          ),
+        );
+      }
+
+      const editLabel = el("div", { className: `${NS}side-heading` }, "Edit value");
+      const edit = el("textarea", {
+        className: `${NS}textarea`,
+        style: { maxWidth: "100%", minHeight: "60px" },
+      });
+      edit.value = value == null ? "" : String(value);
+      const save = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Save");
+      save.onclick = async () => {
+        if (!(await authenticate())) return;
+        const kind = select.value;
+        try {
+          if (kind === "localStorage") localStorage.setItem(key, edit.value);
+          else if (kind === "sessionStorage") sessionStorage.setItem(key, edit.value);
+          else if (kind === "cookies") {
+            document.cookie = `${encodeURIComponent(key)}=${edit.value}; path=/`;
+          }
+          recordAttr(kind === "cookies" ? "cookie" : kind, key, edit.value, "DevTools edit");
+          render();
+          showAttr(kind === "cookies" ? "cookie" : kind, key, edit.value);
+        } catch (err) {
+          window.alert(String(err));
+        }
+      };
+      const del = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Delete");
+      del.onclick = async () => {
+        if (!(await authenticate())) return;
+        const kind = select.value;
+        if (kind === "localStorage") localStorage.removeItem(key);
+        else if (kind === "sessionStorage") sessionStorage.removeItem(key);
+        else if (kind === "cookies") {
+          document.cookie = `${encodeURIComponent(key)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+        }
+        clear(detail);
+        detail.appendChild(el("div", { className: `${NS}side-text` }, "Deleted."));
+        render();
+      };
+      detail.append(editLabel, edit, save, del);
+    }
+
+    function typeName(v) {
+      if (v === null) return "null";
+      if (v === undefined) return "undefined";
+      if (Array.isArray(v)) return "Array";
+      if (v instanceof Element) return "Element";
+      if (v instanceof Node) return "Node";
+      if (typeof v === "function") return "function";
+      if (typeof v === "object") {
+        try {
+          const n = v.constructor && v.constructor.name;
+          return n || "Object";
+        } catch {
+          return "Object";
+        }
+      }
+      return typeof v;
+    }
+
+    function previewValue(v) {
+      try {
+        if (v === null) return "null";
+        if (v === undefined) return "undefined";
+        if (typeof v === "function") {
+          const name = v.name || "(anonymous)";
+          return `ƒ ${name}`;
+        }
+        if (typeof v === "symbol") return v.toString();
+        if (typeof v === "bigint") return v.toString() + "n";
+        if (typeof v === "string") return JSON.stringify(v.slice(0, 120));
+        if (typeof v === "number" || typeof v === "boolean") return String(v);
+        if (Array.isArray(v)) return `Array(${v.length})`;
+        if (v instanceof Element) return `<${v.tagName.toLowerCase()}>`;
+        return typeName(v);
+      } catch {
+        return "(unreadable)";
+      }
+    }
+
+    // Known browser / boring globals to de-prioritize
+    const BORING = new Set([
+      "window", "self", "document", "location", "navigator", "history", "screen",
+      "localStorage", "sessionStorage", "caches", "indexedDB", "crypto", "performance",
+      "console", "chrome", "webkitStorageInfo", "speechSynthesis", "trustedTypes",
+      "customElements", "CSS", "StyleSheet", "HTMLElement", "Node", "Element",
+      "Event", "MouseEvent", "KeyboardEvent", "Promise", "Proxy", "Reflect",
+      "Array", "Object", "String", "Number", "Boolean", "Symbol", "Map", "Set",
+      "WeakMap", "WeakSet", "JSON", "Math", "Date", "RegExp", "Error", "Function",
+      "parseInt", "parseFloat", "isNaN", "isFinite", "eval", "alert", "confirm",
+      "prompt", "fetch", "XMLHttpRequest", "WebSocket", "Worker", "Blob", "File",
+      "FormData", "URL", "URLSearchParams", "Headers", "Request", "Response",
+      "AbortController", "MutationObserver", "ResizeObserver", "IntersectionObserver",
+      "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "setInterval",
+      "clearTimeout", "clearInterval", "queueMicrotask", "structuredClone",
+      "atob", "btoa", "encodeURI", "decodeURI", "encodeURIComponent", "decodeURIComponent",
+      "getComputedStyle", "matchMedia", "getSelection", "find", "focus", "blur",
+      "open", "close", "print", "stop", "moveBy", "moveTo", "resizeBy", "resizeTo",
+      "scroll", "scrollBy", "scrollTo", "postMessage", "reportError",
+      "frames", "parent", "top", "opener", "closed", "length", "name", "status",
+      "origin", "event", "undefined", "NaN", "Infinity", "globalThis",
+    ]);
+
+    function listGlobals(filter) {
+      const out = [];
+      const seen = new Set();
+      let obj = window;
+      let depth = 0;
+      while (obj && depth < 3) {
+        let names = [];
+        try {
+          names = Object.getOwnPropertyNames(obj);
+        } catch {
+          break;
+        }
+        for (const name of names) {
+          if (seen.has(name)) continue;
+          seen.add(name);
+          if (name.startsWith("__n3xn_")) continue;
+          if (filter && !name.toLowerCase().includes(filter) && !String(typeName(safeGet(name))).toLowerCase().includes(filter)) {
+            // still allow if filter matches preview later
+          }
+          let value;
+          let readable = true;
+          try {
+            value = obj[name];
+          } catch {
+            readable = false;
+            value = undefined;
+          }
+          const t = readable ? typeName(value) : "(throw)";
+          const boring = BORING.has(name) || (typeof value === "function" && /^[A-Z]/.test(name) && name.length > 2);
+          out.push({ name, value, type: t, boring, readable });
+        }
+        try {
+          obj = Object.getPrototypeOf(obj);
+        } catch {
+          break;
+        }
+        depth++;
+      }
+      // sort: non-boring first, then alpha
+      out.sort((a, b) => {
+        if (a.boring !== b.boring) return a.boring ? 1 : -1;
+        return a.name.localeCompare(b.name);
+      });
+      if (filter) {
+        const q = filter.toLowerCase();
+        return out.filter(
+          (x) =>
+            x.name.toLowerCase().includes(q) ||
+            x.type.toLowerCase().includes(q) ||
+            previewValue(x.value).toLowerCase().includes(q),
+        );
+      }
+      return out;
+    }
+
+    function safeGet(name) {
+      try {
+        return window[name];
+      } catch {
+        return undefined;
+      }
+    }
+
+    function showGlobal(entry) {
+      clear(detail);
+      detail.appendChild(el("div", { className: `${NS}side-heading` }, `window.${entry.name}`));
+      detail.appendChild(el("div", { className: `${NS}side-text` }, `type: ${entry.type}`));
+      let text = "";
+      try {
+        if (typeof entry.value === "function") {
+          text = Function.prototype.toString.call(entry.value).slice(0, 2000);
+        } else if (typeof entry.value === "object" && entry.value !== null) {
+          text = JSON.stringify(entry.value, (k, v) => {
+            if (typeof v === "function") return `ƒ ${v.name || ""}`;
+            if (typeof v === "bigint") return v.toString() + "n";
+            if (v instanceof Element) return `<${v.tagName.toLowerCase()}>`;
+            return v;
+          }, 2).slice(0, 4000);
+        } else {
+          text = String(entry.value);
+        }
+      } catch (err) {
+        text = "(cannot serialize: " + err + ")";
+      }
+      const pre = el("div", { className: `${NS}side-text`, style: { whiteSpace: "pre-wrap", fontFamily: "Consolas,monospace" } });
+      pre.textContent = text;
+      detail.appendChild(pre);
+
+      if (entry.readable && typeof entry.value !== "function") {
+        const edit = el("textarea", { className: `${NS}textarea`, style: { maxWidth: "100%" } });
+        try {
+          edit.value =
+            typeof entry.value === "string"
+              ? entry.value
+              : JSON.stringify(entry.value, null, 2);
+        } catch {
+          edit.value = String(entry.value);
+        }
+        const save = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Set window." + entry.name);
+        save.onclick = async () => {
+          if (!(await authenticate())) return;
+          try {
+            let v = edit.value;
+            try {
+              v = JSON.parse(edit.value);
+            } catch {
+              /* keep string */
+            }
+            window[entry.name] = v;
+            render();
+            showGlobal({ ...entry, value: window[entry.name], type: typeName(window[entry.name]) });
+          } catch (err) {
+            window.alert(String(err));
+          }
+        };
+        detail.append(el("div", { className: `${NS}side-heading` }, "Edit"), edit, save);
+      }
+    }
+
+    function render() {
       clear(list);
       const kind = select.value;
-      if (kind === "cookies") {
-        const cookies = document.cookie ? document.cookie.split("; ") : [];
-        if (!cookies.length) { list.appendChild(el("div", { className: `${NS}empty` }, "No cookies.")); return; }
-        for (const c of cookies) {
-          const [k, ...rest] = c.split("=");
+      const filter = (search.value || "").trim().toLowerCase();
+
+      if (kind === "JS variables") {
+        const globals = listGlobals(filter);
+        if (!globals.length) {
+          list.appendChild(el("div", { className: `${NS}empty` }, "No matching globals."));
+          return;
+        }
+        // header row
+        const head = el("div", { className: `${NS}storage-row` });
+        head.style.opacity = "0.6";
+        head.append(
+          el("div", { className: `${NS}storage-key` }, "name"),
+          el("div", { className: `${NS}storage-val` }, "type / preview"),
+          el("div", {}, ""),
+        );
+        list.appendChild(head);
+
+        let shown = 0;
+        for (const g of globals) {
+          if (shown > 400) {
+            list.appendChild(el("div", { className: `${NS}empty` }, "…truncated (filter to narrow)"));
+            break;
+          }
+          // default hide boring unless filtering
+          if (g.boring && !filter) continue;
+          shown++;
           const row = el("div", { className: `${NS}storage-row` });
+          row.style.cursor = "pointer";
+          if (g.boring) row.style.opacity = "0.55";
           row.append(
-            el("div", { className: `${NS}storage-key` }, k),
-            el("div", { className: `${NS}storage-val` }, rest.join("=").slice(0, 100)),
+            el("div", { className: `${NS}storage-key`, title: g.name }, g.name),
+            el(
+              "div",
+              { className: `${NS}storage-val`, title: previewValue(g.value) },
+              `${g.type}  ${previewValue(g.value)}`.slice(0, 100),
+            ),
             el("div", {}, ""),
           );
+          row.onclick = () => showGlobal(g);
+          list.appendChild(row);
+        }
+        if (!shown) {
+          list.appendChild(
+            el("div", { className: `${NS}empty` }, "Only built-ins found — type a filter to show them."),
+          );
+        }
+        return;
+      }
+
+      if (kind === "cookies") {
+        const cookies = document.cookie ? document.cookie.split("; ") : [];
+        const rows = cookies
+          .map((c) => {
+            const eq = c.indexOf("=");
+            const k = eq === -1 ? c : c.slice(0, eq);
+            const v = eq === -1 ? "" : c.slice(eq + 1);
+            return { k: decodeURIComponent(k), v };
+          })
+          .filter((x) => !filter || x.k.toLowerCase().includes(filter) || x.v.toLowerCase().includes(filter));
+
+        if (!rows.length) {
+          list.appendChild(el("div", { className: `${NS}empty` }, "No cookies."));
+          return;
+        }
+        for (const { k, v } of rows) {
+          const row = el("div", { className: `${NS}storage-row` });
+          row.style.cursor = "pointer";
+          const a = attrFor("cookie", k);
+          const src = a ? a.via : "?";
+          row.append(
+            el("div", { className: `${NS}storage-key`, title: k }, k),
+            el("div", { className: `${NS}storage-val`, title: v }, v.slice(0, 80)),
+            el("div", { className: `${NS}network-meta`, title: src }, src.slice(0, 8)),
+          );
+          row.onclick = () => showAttr("cookie", k, v);
           list.appendChild(row);
         }
         return;
       }
+
       const store = kind === "localStorage" ? localStorage : sessionStorage;
-      const keys = Object.keys(store);
-      if (!keys.length) { list.appendChild(el("div", { className: `${NS}empty` }, `No ${kind} entries.`)); return; }
+      const keys = Object.keys(store).filter(
+        (k) =>
+          !filter ||
+          k.toLowerCase().includes(filter) ||
+          String(store.getItem(k) || "").toLowerCase().includes(filter),
+      );
+      if (!keys.length) {
+        list.appendChild(el("div", { className: `${NS}empty` }, `No ${kind} entries.`));
+        return;
+      }
       for (const key of keys) {
+        const val = store.getItem(key) || "";
         const row = el("div", { className: `${NS}storage-row` });
-        const del = el("button", { className: `${NS}action`, style: { margin: "0", padding: "2px 6px" } }, "×");
-        del.onclick = async () => {
-          if (!(await authenticate())) return;
-          store.removeItem(key);
-          render();
-        };
+        row.style.cursor = "pointer";
+        const a = attrFor(kind, key);
+        const src = a ? a.via : "?";
         row.append(
           el("div", { className: `${NS}storage-key`, title: key }, key),
-          el("div", { className: `${NS}storage-val`, title: store.getItem(key) }, (store.getItem(key) || "").slice(0, 100)),
-          del,
+          el("div", { className: `${NS}storage-val`, title: val }, val.slice(0, 80)),
+          el("div", { className: `${NS}network-meta`, title: src }, src.slice(0, 10)),
         );
+        row.onclick = () => showAttr(kind, key, val);
         list.appendChild(row);
+      }
+    }
+
+    select.onchange = () => {
+      clear(detail);
+      detail.appendChild(
+        el("div", { className: `${NS}side-text` }, "Select a row for details, source, and edit."),
+      );
+      render();
+    };
+    search.addEventListener("input", render);
+
+    addBtn.onclick = async () => {
+      if (!(await authenticate())) return;
+      const kind = select.value;
+      if (kind === "JS variables") {
+        const name = window.prompt("Global property name (window.NAME):");
+        if (!name) return;
+        const raw = window.prompt("Value (JSON or plain string):", '""');
+        if (raw === null) return;
+        let v = raw;
+        try {
+          v = JSON.parse(raw);
+        } catch {}
+        try {
+          window[name] = v;
+          render();
+        } catch (err) {
+          window.alert(String(err));
+        }
+        return;
+      }
+      const key = window.prompt("Key / cookie name:");
+      if (!key) return;
+      const value = window.prompt("Value:", "") ?? "";
+      try {
+        if (kind === "localStorage") localStorage.setItem(key, value);
+        else if (kind === "sessionStorage") sessionStorage.setItem(key, value);
+        else if (kind === "cookies") {
+          document.cookie = `${encodeURIComponent(key)}=${value}; path=/`;
+        }
+        recordAttr(kind === "cookies" ? "cookie" : kind, key, value, "DevTools add");
+        render();
+      } catch (err) {
+        window.alert(String(err));
       }
     };
 
-    select.onchange = render;
     clearBtn.onclick = async () => {
       if (!(await authenticate())) return;
       const kind = select.value;
+      if (kind === "JS variables") {
+        window.alert("Clear all is not available for JS variables (would break the page).");
+        return;
+      }
+      if (!window.confirm(`Clear all ${kind}?`)) return;
       if (kind === "localStorage") localStorage.clear();
       else if (kind === "sessionStorage") sessionStorage.clear();
-      else {
+      else if (kind === "cookies") {
         for (const c of document.cookie.split("; ")) {
-          const name = c.split("=")[0];
+          const name = c.split("=")[0].trim();
+          if (!name) continue;
           document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
         }
       }
       render();
     };
-    render();
 
     detail.appendChild(el("div", { className: `${NS}side-heading` }, "Application"));
-    detail.appendChild(el("div", { className: `${NS}side-text` }, "Storage inspector. Destructive actions need password."));
+    detail.appendChild(
+      el(
+        "div",
+        { className: `${NS}side-text` },
+        "Storage edits need the DevTools password. “Written by” shows a stack when the write happened after DevTools loaded.",
+      ),
+    );
+    render();
   }
 
-  /* ── Settings + cloaking ── */
 
   function showSettings() {
     currentTab = "Settings";
@@ -1029,6 +1506,7 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
 
     loadCSS();
     installNetworkIntercept();
+    installStorageHooks();
     captureConsole();
 
     // CSS variable for page push

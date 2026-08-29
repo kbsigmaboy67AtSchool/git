@@ -2,53 +2,6 @@
 const SESSION_COOKIE = "n3xn_session";
 const SESSION_TTL = 60 * 60 * 24 * 30;
 
-async function sign(value, secret) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(value),
-  );
-
-  return btoa(String.fromCharCode(...new Uint8Array(signature)))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
-}
-
-async function validSession(request, secret) {
-  if (!secret) return false;
-
-  const cookie = request.headers.get("Cookie") || "";
-  const token = cookie.match(
-    /(?:^|;\s*)n3xn_session=([^;]+)/,
-  )?.[1];
-
-  if (!token) return false;
-
-  const [expires, signature] = token.split(".");
-
-  if (
-    !expires ||
-    !signature ||
-    !/^\d+$/.test(expires) ||
-    Number(expires) < Math.floor(Date.now() / 1000)
-  ) {
-    return false;
-  }
-
-  const expected = await sign(expires, secret);
-
-  return signature === expected;
-}
-
 function loginPage(error = "") {
   return new Response(
     `<!doctype html>
@@ -56,68 +9,70 @@ function loginPage(error = "") {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>n3xn — Login</title>
+<title>n3xn — Private</title>
 <style>
-html,body{height:100%;margin:0}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%}
 body{
   display:grid;
   place-items:center;
-  background:#080b10;
+  background:#080a0f;
   color:#e6edf3;
-  font:15px system-ui,sans-serif
+  font-family:system-ui,-apple-system,sans-serif
 }
 .box{
-  width:min(380px,calc(100vw - 40px));
-  padding:28px;
+  width:min(390px,calc(100vw - 32px));
+  padding:30px;
   border:1px solid #30363d;
-  border-radius:12px;
+  border-radius:14px;
   background:#0d1117;
-  box-sizing:border-box
+  box-shadow:0 20px 60px #0008
 }
-h1{margin:0 0 8px}
-p{color:#8b949e}
-input,button{
-  width:100%;
-  box-sizing:border-box;
-  padding:11px;
-  border-radius:7px;
-  font:inherit
-}
+h1{margin:0 0 6px;font-size:24px}
+p{margin:0 0 22px;color:#8b949e}
 input{
+  width:100%;
+  padding:12px;
+  margin-bottom:10px;
+  border:1px solid #30363d;
+  border-radius:7px;
+  outline:none;
   background:#010409;
   color:#fff;
-  border:1px solid #30363d;
-  margin-bottom:10px
+  font:inherit
 }
+input:focus{border-color:#58a6ff}
 button{
+  width:100%;
+  padding:12px;
   border:0;
+  border-radius:7px;
   background:#238636;
   color:#fff;
-  cursor:pointer;
-  font-weight:600
+  font-weight:600;
+  cursor:pointer
 }
-.err{color:#ff7b72;margin-bottom:12px}
+.err{
+  margin-bottom:12px;
+  color:#ff7b72
+}
 </style>
 </head>
 <body>
-<main class="box">
+<form class="box" method="POST" action="/login">
 <h1>n3xn</h1>
 <p>Private access</p>
-
-<form method="POST" action="/login">
 ${error ? `<div class="err">${error}</div>` : ""}
 <input
-  name="password"
-  type="password"
-  autocomplete="current-password"
-  placeholder="Password"
-  autofocus
-  required
+ name="password"
+ type="password"
+ autocomplete="current-password"
+ placeholder="Password"
+ autofocus
+ required
 >
 <button type="submit">Continue</button>
 </form>
-
-</main>
 </body>
 </html>`,
     {
@@ -130,15 +85,83 @@ ${error ? `<div class="err">${error}</div>` : ""}
   );
 }
 
+async function makeSignature(value, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    {
+      name: "HMAC",
+      hash: "SHA-256",
+    },
+    false,
+    ["sign"],
+  );
+
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(value),
+  );
+
+  return btoa(
+    String.fromCharCode(...new Uint8Array(signature)),
+  )
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+async function checkSession(request, secret) {
+  if (!secret) return false;
+
+  const cookies = request.headers.get("Cookie") || "";
+
+  const token = cookies.match(
+    /(?:^|;\s*)n3xn_session=([^;]+)/,
+  )?.[1];
+
+  if (!token) return false;
+
+  const split = token.split(".");
+
+  if (split.length !== 2) return false;
+
+  const [expires, signature] = split;
+
+  if (!/^\d+$/.test(expires)) return false;
+
+  if (
+    Number(expires) <
+    Math.floor(Date.now() / 1000)
+  ) {
+    return false;
+  }
+
+  const expected = await makeSignature(
+    expires,
+    secret,
+  );
+
+  return signature === expected;
+}
+
+function sessionCookie(expires, signature) {
+  return [
+    `n3xn_session=${expires}.${signature}`,
+    "Path=/",
+    `Max-Age=${SESSION_TTL}`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Strict",
+  ].join("; ");
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
 
-  const password = env.N3XN_PASSWORD;
-  const sessionSecret = env.N3XN_SESSION_SECRET;
-
   /*
-   * LOGIN
+   * PUBLIC AUTH ROUTES
    */
 
   if (url.pathname === "/login") {
@@ -148,93 +171,90 @@ export async function onRequest(context) {
 
     if (request.method === "POST") {
       const form = await request.formData();
-      const supplied = String(form.get("password") || "");
+      const supplied = String(
+        form.get("password") || "",
+      );
 
-      if (!password || supplied !== password) {
+      if (
+        !env.N3XN_PASSWORD ||
+        supplied !== env.N3XN_PASSWORD
+      ) {
         return loginPage("Incorrect password.");
       }
 
-      if (!sessionSecret) {
+      if (!env.N3XN_SESSION_SECRET) {
         return new Response(
-          "N3XN_SESSION_SECRET is not configured.",
+          "N3XN_SESSION_SECRET is missing.",
           { status: 500 },
         );
       }
 
       const expires =
-        Math.floor(Date.now() / 1000) + SESSION_TTL;
+        Math.floor(Date.now() / 1000) +
+        SESSION_TTL;
 
-      const signature = await sign(
-        String(expires),
-        sessionSecret,
-      );
-
-      const headers = new Headers({
-        Location: "/",
-      });
-
-      headers.append(
-        "Set-Cookie",
-        `${SESSION_COOKIE}=${expires}.${signature}; Path=/; Max-Age=${SESSION_TTL}; HttpOnly; Secure; SameSite=Strict`,
-      );
+      const signature =
+        await makeSignature(
+          String(expires),
+          env.N3XN_SESSION_SECRET,
+        );
 
       return new Response(null, {
         status: 303,
-        headers,
+        headers: {
+          Location: "/",
+          "Set-Cookie": sessionCookie(
+            expires,
+            signature,
+          ),
+        },
       });
     }
 
-    return new Response("Method Not Allowed", {
-      status: 405,
-    });
+    return new Response(
+      "Method Not Allowed",
+      { status: 405 },
+    );
   }
-
-  /*
-   * LOGOUT
-   */
 
   if (url.pathname === "/logout") {
-    const headers = new Headers({
-      Location: "/login",
-    });
-
-    headers.append(
-      "Set-Cookie",
-      `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`,
-    );
-
     return new Response(null, {
       status: 303,
-      headers,
+      headers: {
+        Location: "/login",
+        "Set-Cookie":
+          "n3xn_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
+      },
     });
   }
 
   /*
-   * EVERYTHING ELSE REQUIRES LOGIN
+   * DEVTOOLS AUTH ENDPOINT IS HANDLED SEPARATELY.
    */
 
-  if (!(await validSession(request, sessionSecret))) {
-    return loginPage();
+  if (url.pathname === "/devtools-auth") {
+    return context.next();
   }
 
   /*
-   * LET THE ACTUAL FUNCTION HANDLE THE REQUEST
+   * EVERYTHING ELSE REQUIRES THE APP LOGIN.
    */
+
+  const authenticated = await checkSession(
+    request,
+    env.N3XN_SESSION_SECRET,
+  );
+
+  if (!authenticated) {
+    return loginPage();
+  }
 
   const response = await context.next();
 
   /*
-   * DEVTOOLS INJECTION
+   * Inject only into actual HTML documents/iframes.
    *
-   * Only inject into:
-   *
-   *   document
-   *   iframe
-   *
-   * HTML responses.
-   *
-   * fetch()/XHR responses don't normally have these
-   * Sec-Fetch-Dest values, so they aren't modified.
+   * fetch()/XHR responses aren't injected.
    */
 
   const destination =
@@ -243,25 +263,35 @@ export async function onRequest(context) {
   const contentType =
     response.headers.get("Content-Type") || "";
 
-  if (
-    (destination === "document" ||
-      destination === "iframe") &&
-    contentType.toLowerCase().includes("text/html")
-  ) {
+  const isDocument =
+    destination === "document" ||
+    destination === "iframe";
+
+  const isHTML =
+    contentType
+      .toLowerCase()
+      .includes("text/html");
+
+  if (isDocument && isHTML) {
     const body = await response.text();
 
-    const injected =
-      body.replace(
-        /<\/body>/i,
-        `<script src="/devtools.js" defer></script></body>`,
-      );
+    const injection =
+      `<script src="/devtools.js" defer></script>`;
 
-    const headers = new Headers(response.headers);
+    const output =
+      /<\/body>/i.test(body)
+        ? body.replace(
+            /<\/body>/i,
+            `${injection}</body>`,
+          )
+        : body + injection;
+
+    const headers =
+      new Headers(response.headers);
 
     headers.delete("Content-Length");
-    headers.set("Cache-Control", "no-store");
 
-    return new Response(injected, {
+    return new Response(output, {
       status: response.status,
       statusText: response.statusText,
       headers,

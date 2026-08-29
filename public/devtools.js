@@ -2323,6 +2323,28 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
 
     // Restore open state
     if (state.open) openPanel();
+    if (state._bootTab) {
+      try {
+        currentTab = state._bootTab;
+        // activate after open
+        const want = state._bootTab;
+        delete state._bootTab;
+        setTimeout(() => {
+          try {
+            const tabs = root && root.querySelectorAll(`[class*="_tab"]`);
+            if (tabs) {
+              for (const t of tabs) {
+                if ((t.textContent || "").trim().toLowerCase() === String(want).toLowerCase()) {
+                  t.click();
+                  break;
+                }
+              }
+            }
+            activateTab(want);
+          } catch {}
+        }, 0);
+      } catch {}
+    }
 
     window.addEventListener("keydown", (e) => {
       if (e.key === "F12" || (e.ctrlKey && e.shiftKey && (e.key === "I" || e.key === "i"))) {
@@ -2335,11 +2357,239 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
 
   /* ── Start ── */
 
+
+  /* ── URL query controls: ?n3xn.key=value ──
+   *
+   * Examples:
+   *   ?n3xn.cachebust=1
+   *   ?n3xn.reset=all
+   *   ?n3xn.reset=htmlPatches,jsPatches
+   *   ?n3xn.resetN3XNstorage=all
+   *   ?n3xn.open=1
+   *   ?n3xn.tab=Persist
+   *   ?n3xn.height=360
+   *   ?n3xn.clearAuth=1
+   *   ?n3xn.enabled=0
+   *   ?n3xn.nocache=1          (alias of cachebust)
+   *   ?n3xn.strip=1            (remove n3xn params from address bar after apply)
+   */
+
+  function getN3xnParams() {
+    const out = Object.create(null);
+    let params;
+    try {
+      params = new URL(location.href).searchParams;
+    } catch {
+      return out;
+    }
+    for (const [key, value] of params.entries()) {
+      const k = key.trim();
+      if (k.toLowerCase().startsWith("n3xn.")) {
+        out[k.slice(5).toLowerCase()] = value;
+      } else if (/^resetn3xnstorage$/i.test(k)) {
+        out["reset"] = value;
+      } else if (/^n3xn$/i.test(k) && value) {
+        // ?n3xn=cachebust  or  ?n3xn=open
+        out[value.toLowerCase()] = "1";
+      }
+    }
+    return out;
+  }
+
+  function stripN3xnParamsFromUrl() {
+    try {
+      const url = new URL(location.href);
+      const kill = [];
+      for (const key of url.searchParams.keys()) {
+        if (
+          key.toLowerCase().startsWith("n3xn.") ||
+          /^resetn3xnstorage$/i.test(key) ||
+          /^n3xn$/i.test(key)
+        ) {
+          kill.push(key);
+        }
+      }
+      if (!kill.length) return;
+      for (const key of kill) url.searchParams.delete(key);
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch {}
+  }
+
+  async function clearN3xnIndexedDB() {
+    try {
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(DB_NAME);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => resolve();
+      });
+    } catch {}
+  }
+
+  function resetStateFields(spec) {
+    const raw = String(spec || "all").trim().toLowerCase();
+    const tokens = raw.split(/[,|+]+/).map((t) => t.trim()).filter(Boolean);
+    const all = tokens.includes("all") || tokens.includes("*") || tokens.length === 0;
+
+    const map = {
+      htmlpatches: "htmlPatches",
+      htmlpatch: "htmlPatches",
+      html: "htmlPatches",
+      jspatches: "jsPatches",
+      jspatch: "jsPatches",
+      js: "jsPatches",
+      headerrules: "headerRules",
+      headers: "headerRules",
+      header: "headerRules",
+      attrrules: "attrRules",
+      attrs: "attrRules",
+      attr: "attrRules",
+      attributes: "attrRules",
+      scripts: "scripts",
+      script: "scripts",
+      title: "titleOverride",
+      titleoverride: "titleOverride",
+      favicon: "faviconOverride",
+      faviconoverride: "faviconOverride",
+      cloak: ["cloakTitle", "cloakFavicon"],
+      auth: "devAuthenticated",
+      devauthenticated: "devAuthenticated",
+      height: "dockHeight",
+      dockheight: "dockHeight",
+      open: "open",
+    };
+
+    const clearKey = (key) => {
+      if (key === "htmlPatches" || key === "jsPatches" || key === "headerRules" || key === "attrRules" || key === "scripts") {
+        state[key] = [];
+      } else if (key === "devAuthenticated" || key === "open" || key === "enabled") {
+        state[key] = key === "enabled" ? true : false;
+      } else if (key === "dockHeight") {
+        state.dockHeight = null;
+      } else {
+        state[key] = null;
+      }
+    };
+
+    if (all) {
+      state.htmlPatches = [];
+      state.jsPatches = [];
+      state.headerRules = [];
+      state.attrRules = [];
+      state.scripts = [];
+      state.titleOverride = null;
+      state.faviconOverride = null;
+      state.cloakTitle = null;
+      state.cloakFavicon = null;
+      state.devAuthenticated = false;
+      state.dockHeight = null;
+      state.open = false;
+      return "all";
+    }
+
+    const done = [];
+    for (const t of tokens) {
+      const target = map[t.replace(/[_\s]/g, "")];
+      if (!target) continue;
+      if (Array.isArray(target)) target.forEach(clearKey);
+      else clearKey(target);
+      done.push(t);
+    }
+    return done.join(",") || "none";
+  }
+
+  async function applyN3xnQueryParams() {
+    const q = getN3xnParams();
+    if (!Object.keys(q).length) return;
+
+    let shouldSave = false;
+    let shouldStrip = q.strip === "1" || q.strip === "true" || q.cachebust || q.nocache || q.reset || q.resetn3xnstorage;
+
+    // cachebust / nocache — bust CSS + remember nothing special beyond strip
+    if (q.cachebust === "1" || q.cachebust === "true" || q.nocache === "1" || "cachebust" in q && q.cachebust !== "0") {
+      try {
+        const old = document.getElementById(`${NS}css`);
+        if (old) old.remove();
+      } catch {}
+      // force CSS reload with query
+      try {
+        const link = document.createElement("link");
+        link.id = `${NS}css`;
+        link.rel = "stylesheet";
+        link.href = `/devtools.css?t=${Date.now()}`;
+        link.onerror = () => {
+          link.onerror = null;
+          link.href = `https://cdn.jsdelivr.net/gh/kbsigmaboy67AtSchool/git@main/public/devtools.css?t=${Date.now()}`;
+        };
+        document.head.appendChild(link);
+      } catch {}
+      console.info("[n3xn] cachebust");
+    }
+
+    // reset storage fields
+    const resetSpec = q.reset || q.resetn3xnstorage || q.resetstorage;
+    if (resetSpec != null && resetSpec !== "0" && resetSpec !== "false") {
+      const what = resetStateFields(resetSpec === "1" || resetSpec === "true" ? "all" : resetSpec);
+      shouldSave = true;
+      console.info("[n3xn] reset storage:", what);
+      if (String(resetSpec).toLowerCase() === "all" || resetSpec === "1" || resetSpec === "true") {
+        await clearN3xnIndexedDB();
+        shouldSave = true;
+      }
+    }
+
+    if (q.clearauth === "1" || q.clearauth === "true") {
+      state.devAuthenticated = false;
+      shouldSave = true;
+    }
+
+    if (q.enabled === "0" || q.enabled === "false") {
+      state.enabled = false;
+      shouldSave = true;
+    }
+    if (q.enabled === "1" || q.enabled === "true") {
+      state.enabled = true;
+      shouldSave = true;
+    }
+
+    if (q.height && /^\d+$/.test(q.height)) {
+      state.dockHeight = Math.max(160, Math.min(900, Number(q.height)));
+      shouldSave = true;
+    }
+
+    if (q.open === "1" || q.open === "true" || q.open === "") {
+      state.open = true;
+      shouldSave = true;
+    }
+
+    if (q.tab) {
+      // consumed after build via state._bootTab
+      state._bootTab = q.tab;
+    }
+
+    if (shouldSave) {
+      try {
+        await saveState();
+      } catch {}
+    }
+
+    if (shouldStrip || q.strip === "1") {
+      stripN3xnParamsFromUrl();
+    }
+  }
+
+
   async function start() {
     try {
       await loadState();
     } catch (err) {
       console.warn("n3xn DevTools loadState", err);
+    }
+
+    try {
+      await applyN3xnQueryParams();
+    } catch (err) {
+      console.warn("n3xn DevTools query params", err);
     }
 
     // Always build UI first so the launcher appears even if patches fail

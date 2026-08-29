@@ -2,18 +2,9 @@
   "use strict";
 
   /*
-   * n3xn DevTools — improved
-   *
-   * Client-side development overlay with:
-   * - Interactive DOM tree + element picker/highlight
-   * - Console with history + page log capture
-   * - Live network (fetch + XHR intercept)
-   * - Storage inspector
-   * - Resizable / dockable panel
-   * - Keyboard shortcuts
-   *
-   * Randomized internal identifiers to avoid collisions
-   * with the proxied document.
+   * n3xn DevTools — right sidebar, pushes page left
+   * + blob URL cloaking
+   * + reliable layout for Monaco
    */
 
   const UUID = crypto.randomUUID().replaceAll("-", "");
@@ -24,11 +15,11 @@
 
   const RAW_BASE =
     "https://raw.githubusercontent.com/kbsigmaboy67AtSchool/git/main/public/";
-
   const CSS_URL = `${RAW_BASE}devtools.css`;
-
   const MONACO_LOADER =
     "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js";
+
+  const DEFAULT_WIDTH = 420;
 
   const state = {
     enabled: true,
@@ -38,18 +29,15 @@
     cloakFavicon: null,
     scripts: [],
     devAuthenticated: false,
-    dock: "float", // float | bottom | right
-    panelW: null,
-    panelH: null,
-    panelX: null,
-    panelY: null,
+    sidebarWidth: DEFAULT_WIDTH,
+    open: false,
   };
 
   let root = null;
   let launcher = null;
   let panel = null;
   let main = null;
-  let sidebar = null;
+  let detail = null;
   let content = null;
   let editor = null;
   let editorReady = false;
@@ -64,10 +52,10 @@
   let originalXHROpen = null;
   let originalXHRSend = null;
   let originalConsole = {};
+  let netListEl = null;
+  let netFilter = "";
 
-  /* ────────────────────────────────────────────
-   * INDEXEDDB
-   * ──────────────────────────────────────────── */
+  /* ── IndexedDB ── */
 
   function openDB() {
     return new Promise((resolve, reject) => {
@@ -93,9 +81,7 @@
         req.onerror = () => reject(req.error);
       });
       if (value) Object.assign(state, value);
-    } catch {
-      /* no persistence */
-    }
+    } catch {}
   }
 
   async function saveState() {
@@ -103,14 +89,10 @@
       const db = await openDB();
       const tx = db.transaction(DB_STORE, "readwrite");
       tx.objectStore(DB_STORE).put(structuredClone(state), "state");
-    } catch {
-      /* non-fatal */
-    }
+    } catch {}
   }
 
-  /* ────────────────────────────────────────────
-   * CSS
-   * ──────────────────────────────────────────── */
+  /* ── CSS ── */
 
   function loadCSS() {
     if (document.getElementById(`${NS}css`)) return;
@@ -121,9 +103,7 @@
     document.head.appendChild(link);
   }
 
-  /* ────────────────────────────────────────────
-   * HELPERS
-   * ──────────────────────────────────────────── */
+  /* ── Helpers ── */
 
   function el(tag, props = {}, text = "") {
     const node = document.createElement(tag);
@@ -167,9 +147,7 @@
     }
   }
 
-  /* ────────────────────────────────────────────
-   * AUTH
-   * ──────────────────────────────────────────── */
+  /* ── Auth ── */
 
   async function authenticate() {
     if (state.devAuthenticated) return true;
@@ -188,16 +166,12 @@
         await saveState();
         return true;
       }
-    } catch {
-      /* network */
-    }
+    } catch {}
     window.alert("DevTools authentication failed.");
     return false;
   }
 
-  /* ────────────────────────────────────────────
-   * MONACO
-   * ──────────────────────────────────────────── */
+  /* ── Monaco ── */
 
   function loadMonaco() {
     return new Promise((resolve, reject) => {
@@ -233,6 +207,10 @@
     clear(main);
     const host = el("div", { className: `${NS}editor` });
     main.appendChild(host);
+
+    // Force a layout pass so flex height is resolved before Monaco measures
+    host.offsetHeight;
+
     try {
       const monaco = await loadMonaco();
       editor = monaco.editor.create(host, {
@@ -240,7 +218,7 @@
         language,
         theme: "vs-dark",
         automaticLayout: true,
-        minimap: { enabled: true },
+        minimap: { enabled: false },
         fontSize: 13,
         lineNumbers: "on",
         roundedSelection: false,
@@ -249,6 +227,13 @@
         padding: { top: 8 },
       });
       editorReady = true;
+
+      // ResizeObserver keeps Monaco correct when sidebar is resized
+      const ro = new ResizeObserver(() => {
+        try { editor.layout(); } catch {}
+      });
+      ro.observe(host);
+
       return editor;
     } catch {
       editorReady = false;
@@ -259,9 +244,7 @@
     }
   }
 
-  /* ────────────────────────────────────────────
-   * HIGHLIGHT
-   * ──────────────────────────────────────────── */
+  /* ── Highlight ── */
 
   function ensureHighlight() {
     if (highlightEl) return highlightEl;
@@ -278,17 +261,15 @@
     box.style.display = "block";
     box.style.left = r.left + "px";
     box.style.top = r.top + "px";
-    box.style.width = r.width + "px";
-    box.style.height = r.height + "px";
+    box.style.width = Math.max(0, r.width) + "px";
+    box.style.height = Math.max(0, r.height) + "px";
   }
 
   function hideHighlight() {
     if (highlightEl) highlightEl.style.display = "none";
   }
 
-  /* ────────────────────────────────────────────
-   * ELEMENTS (DOM tree)
-   * ──────────────────────────────────────────── */
+  /* ── Elements ── */
 
   function nodeLabel(node) {
     if (node.nodeType === 3) {
@@ -300,7 +281,6 @@
       return { kind: "comment", text: `<!-- ${node.textContent.slice(0, 40)} -->` };
     }
     if (node.nodeType !== 1) return null;
-
     const tag = node.tagName.toLowerCase();
     let attrs = "";
     if (node.id) attrs += ` id="${node.id}"`;
@@ -315,10 +295,7 @@
     const info = nodeLabel(domNode);
     if (!info) return null;
 
-    const row = el("div", {
-      className: `${NS}tree-node`,
-      dataset: { depth: String(depth) },
-    });
+    const row = el("div", { className: `${NS}tree-node`, dataset: { depth: String(depth) } });
     row._dom = domNode;
 
     const toggle = el("span", { className: `${NS}tree-toggle` }, " ");
@@ -327,7 +304,7 @@
     if (info.kind === "element") {
       const kids = Array.from(domNode.childNodes).filter((n) => nodeLabel(n));
       if (kids.length) {
-        toggle.textContent = "▸";
+        toggle.textContent = depth < 2 ? "▾" : "▸";
         toggle.onclick = (e) => {
           e.stopPropagation();
           const children = row.nextElementSibling;
@@ -364,12 +341,10 @@
       if (selectedNode) selectedNode.classList.remove(`${NS}selected`);
       row.classList.add(`${NS}selected`);
       selectedNode = row;
-      updateElementSidebar(domNode);
+      updateElementDetail(domNode);
       if (domNode.nodeType === 1) {
         showHighlight(domNode);
-        try {
-          domNode.scrollIntoView({ block: "nearest", behavior: "smooth" });
-        } catch {}
+        try { domNode.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch {}
       }
     });
 
@@ -381,7 +356,6 @@
       if (kids.length) {
         const children = el("div", { className: `${NS}tree-children` });
         children.style.display = depth < 2 ? "block" : "none";
-        if (depth < 2) toggle.textContent = "▾";
         for (const child of kids) {
           const built = buildTreeNode(child, depth + 1);
           if (built) children.appendChild(built);
@@ -389,46 +363,39 @@
         wrap.appendChild(children);
       }
     }
-
     return wrap;
   }
 
-  function updateElementSidebar(domNode) {
-    clear(sidebar);
+  function updateElementDetail(domNode) {
+    clear(detail);
     if (!domNode || domNode.nodeType !== 1) {
-      sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "Element"));
-      sidebar.appendChild(el("div", { className: `${NS}side-text` }, "Select a node in the tree."));
+      detail.appendChild(el("div", { className: `${NS}side-heading` }, "Element"));
+      detail.appendChild(el("div", { className: `${NS}side-text` }, "Select a node in the tree."));
       return;
     }
 
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, `<${domNode.tagName.toLowerCase()}>`));
-
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, `<${domNode.tagName.toLowerCase()}>`));
     const rect = domNode.getBoundingClientRect();
-    sidebar.appendChild(
-      el(
-        "div",
-        { className: `${NS}side-text` },
-        `${Math.round(rect.width)}×${Math.round(rect.height)} · ${domNode.childNodes.length} children`
-      )
+    detail.appendChild(
+      el("div", { className: `${NS}side-text` },
+        `${Math.round(rect.width)}×${Math.round(rect.height)} · ${domNode.childNodes.length} children`)
     );
 
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "Attributes"));
-    if (domNode.attributes.length === 0) {
-      sidebar.appendChild(el("div", { className: `${NS}side-text` }, "(none)"));
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, "Attributes"));
+    if (!domNode.attributes.length) {
+      detail.appendChild(el("div", { className: `${NS}side-text` }, "(none)"));
     } else {
       for (const attr of domNode.attributes) {
         const row = el("div", { className: `${NS}side-text` });
-        row.innerHTML = `<strong style="color:#9cdcfe">${escapeHTML(attr.name)}</strong> = "${escapeHTML(attr.value.slice(0, 60))}"`;
-        sidebar.appendChild(row);
+        row.innerHTML = `<strong style="color:#9cdcfe">${escapeHTML(attr.name)}</strong> = "${escapeHTML(attr.value.slice(0, 80))}"`;
+        detail.appendChild(row);
       }
     }
 
     const styles = getComputedStyle(domNode);
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "Key styles"));
-    for (const prop of ["display", "position", "width", "height", "color", "background-color", "font-size", "margin", "padding"]) {
-      const row = el("div", { className: `${NS}side-text` });
-      row.textContent = `${prop}: ${styles.getPropertyValue(prop)}`;
-      sidebar.appendChild(row);
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, "Key styles"));
+    for (const prop of ["display", "position", "width", "height", "color", "background-color", "font-size"]) {
+      detail.appendChild(el("div", { className: `${NS}side-text` }, `${prop}: ${styles.getPropertyValue(prop)}`));
     }
 
     const delBtn = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Remove element");
@@ -438,21 +405,17 @@
       hideHighlight();
       showElements();
     };
-    sidebar.appendChild(delBtn);
+    detail.appendChild(delBtn);
   }
 
   function showElements() {
     currentTab = "Elements";
     clear(main);
-    clear(sidebar);
-    content.removeAttribute("data-no-sidebar");
+    clear(detail);
+    detail.style.display = "";
 
-    const toolbar = el("div", { className: `${NS}console-toolbar` });
-    const search = el("input", {
-      className: `${NS}search`,
-      placeholder: "Filter nodes (tag, id, class)…",
-      style: { margin: "0", flex: "1" },
-    });
+    const toolbar = el("div", { className: `${NS}toolbar` });
+    const search = el("input", { className: `${NS}search`, placeholder: "Filter nodes…" });
     const refresh = el("button", { className: `${NS}action`, style: { margin: "0" } }, "Refresh");
     toolbar.append(search, refresh);
     main.appendChild(toolbar);
@@ -462,15 +425,12 @@
 
     const render = (filter = "") => {
       clear(tree);
-      const rootNode = document.documentElement;
-      const built = buildTreeNode(rootNode, 0);
+      const built = buildTreeNode(document.documentElement, 0);
       if (built) tree.appendChild(built);
-
       if (filter) {
         const q = filter.toLowerCase();
         tree.querySelectorAll(`.${NS}tree-node`).forEach((row) => {
-          const text = row.textContent.toLowerCase();
-          row.style.display = text.includes(q) ? "" : "none";
+          row.style.display = row.textContent.toLowerCase().includes(q) ? "" : "none";
         });
       }
     };
@@ -479,23 +439,19 @@
     search.addEventListener("input", () => render(search.value.trim()));
     refresh.onclick = () => render(search.value.trim());
 
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "DOM Inspector"));
-    sidebar.appendChild(
-      el("div", { className: `${NS}side-text` }, "Hover to highlight · Click to inspect · Expand nodes with ▸")
-    );
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, "DOM Inspector"));
+    detail.appendChild(el("div", { className: `${NS}side-text` }, "Hover to highlight · Click to inspect"));
   }
 
-  /* ────────────────────────────────────────────
-   * CONSOLE
-   * ──────────────────────────────────────────── */
+  /* ── Console ── */
 
   function showConsole() {
     currentTab = "Console";
     clear(main);
-    clear(sidebar);
-    content.removeAttribute("data-no-sidebar");
+    clear(detail);
+    detail.style.display = "none";
 
-    const toolbar = el("div", { className: `${NS}console-toolbar` });
+    const toolbar = el("div", { className: `${NS}toolbar` });
     const clearBtn = el("button", { className: `${NS}action`, style: { margin: "0" } }, "Clear");
     toolbar.appendChild(clearBtn);
     main.appendChild(toolbar);
@@ -507,7 +463,7 @@
     const prompt = el("span", { className: `${NS}console-prompt` }, "›");
     const input = el("textarea", {
       className: `${NS}console-input`,
-      placeholder: "Enter JS · Enter to run · Shift+Enter newline · ↑/↓ history",
+      placeholder: "JS · Enter run · Shift+Enter newline · ↑/↓ history",
       rows: 1,
     });
     inputWrap.append(prompt, input);
@@ -515,14 +471,10 @@
 
     const write = (value, type = "result") => {
       const row = el("div", { className: `${NS}console-row ${NS}${type}` });
-      if (typeof value === "string") {
-        row.textContent = value;
-      } else {
-        try {
-          row.textContent = JSON.stringify(value, null, 2);
-        } catch {
-          row.textContent = String(value);
-        }
+      if (typeof value === "string") row.textContent = value;
+      else {
+        try { row.textContent = JSON.stringify(value, null, 2); }
+        catch { row.textContent = String(value); }
       }
       output.appendChild(row);
       output.scrollTop = output.scrollHeight;
@@ -530,7 +482,6 @@
 
     clearBtn.onclick = () => clear(output);
 
-    // Replay any buffered page logs if we captured them
     if (window[`${NS}logBuffer`]) {
       for (const entry of window[`${NS}logBuffer`]) {
         write(entry.args.map(String).join(" "), entry.level);
@@ -540,7 +491,7 @@
     input.addEventListener("keydown", async (event) => {
       if (event.key === "ArrowUp" && !event.shiftKey) {
         event.preventDefault();
-        if (consoleHistory.length === 0) return;
+        if (!consoleHistory.length) return;
         if (historyIndex < 0) historyIndex = consoleHistory.length;
         historyIndex = Math.max(0, historyIndex - 1);
         input.value = consoleHistory[historyIndex] || "";
@@ -561,14 +512,12 @@
       input.value = "";
       consoleHistory.push(code);
       historyIndex = -1;
-
       write(`› ${code}`, "command");
 
       if (!(await authenticate())) {
         write("Execution denied.", "error");
         return;
       }
-
       try {
         const result = (0, eval)(code);
         write(result === undefined ? "undefined" : result);
@@ -576,22 +525,15 @@
         write(error?.stack || String(error), "error");
       }
     });
-
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "Console"));
-    sidebar.appendChild(
-      el("div", { className: `${NS}side-text` }, "JavaScript runs in the page context. Password required.")
-    );
   }
 
-  /* ────────────────────────────────────────────
-   * SOURCES
-   * ──────────────────────────────────────────── */
+  /* ── Sources ── */
 
   async function showSources() {
     currentTab = "Sources";
     clear(main);
-    clear(sidebar);
-    content.removeAttribute("data-no-sidebar");
+    clear(detail);
+    detail.style.display = "";
 
     const source = document.documentElement.outerHTML;
     const ed = await createMonaco(source, "html");
@@ -605,16 +547,12 @@
       document.close();
     };
 
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "Sources"));
-    sidebar.appendChild(
-      el("div", { className: `${NS}side-text` }, "Edit the live HTML. Applying requires DevTools password.")
-    );
-    sidebar.appendChild(apply);
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, "Sources"));
+    detail.appendChild(el("div", { className: `${NS}side-text` }, "Edit live HTML. Apply requires password."));
+    detail.appendChild(apply);
   }
 
-  /* ────────────────────────────────────────────
-   * NETWORK
-   * ──────────────────────────────────────────── */
+  /* ── Network ── */
 
   function installNetworkIntercept() {
     if (intercepted) return;
@@ -638,12 +576,7 @@
       const entry = {
         id: crypto.randomUUID(),
         method: String(method).toUpperCase(),
-        url,
-        status: 0,
-        type: "fetch",
-        size: 0,
-        time: 0,
-        ok: false,
+        url, status: 0, type: "fetch", size: 0, time: 0, ok: false,
       };
       networkLog.unshift(entry);
       if (networkLog.length > 200) networkLog.length = 200;
@@ -682,13 +615,8 @@
       meta.start = performance.now();
       const entry = {
         id: crypto.randomUUID(),
-        method: meta.method,
-        url: meta.url,
-        status: 0,
-        type: "xhr",
-        size: 0,
-        time: 0,
-        ok: false,
+        method: meta.method, url: meta.url,
+        status: 0, type: "xhr", size: 0, time: 0, ok: false,
       };
       networkLog.unshift(entry);
       if (networkLog.length > 200) networkLog.length = 200;
@@ -697,52 +625,34 @@
         entry.status = this.status;
         entry.ok = this.status >= 200 && this.status < 400;
         entry.time = Math.round(performance.now() - meta.start);
-        try {
-          entry.size = (this.responseText && this.responseText.length) || 0;
-        } catch {}
+        try { entry.size = (this.responseText && this.responseText.length) || 0; } catch {}
         if (currentTab === "Network") renderNetworkList();
       });
-
       return originalXHRSend.apply(this, args);
     };
   }
 
-  let netListEl = null;
-  let netFilter = "";
-
   function renderNetworkList() {
     if (!netListEl) return;
     clear(netListEl);
-
     const filtered = networkLog.filter((e) => {
       if (!netFilter) return true;
       const q = netFilter.toLowerCase();
-      return (
-        e.url.toLowerCase().includes(q) ||
-        e.method.toLowerCase().includes(q) ||
-        String(e.status).includes(q)
-      );
+      return e.url.toLowerCase().includes(q) || e.method.toLowerCase().includes(q) || String(e.status).includes(q);
     });
-
     if (!filtered.length) {
-      netListEl.appendChild(el("div", { className: `${NS}empty` }, "No requests yet. Interact with the page."));
+      netListEl.appendChild(el("div", { className: `${NS}empty` }, "No requests yet."));
       return;
     }
-
     for (const entry of filtered) {
       const row = el("div", { className: `${NS}network-row` });
-      const method = el("div", {
-        className: `${NS}network-method`,
-        dataset: { m: entry.method },
-      }, entry.method);
-      const name = el("div", { className: `${NS}network-name`, title: entry.url }, shortUrl(entry.url));
-      const status = el("div", {
-        className: `${NS}network-status`,
-        dataset: { ok: entry.ok ? "1" : "0" },
-      }, entry.status || "…");
-      const size = el("div", { className: `${NS}network-meta` }, formatBytes(entry.size));
-      const time = el("div", { className: `${NS}network-meta` }, entry.time ? entry.time + " ms" : "…");
-      row.append(method, name, status, size, time);
+      row.append(
+        el("div", { className: `${NS}network-method`, dataset: { m: entry.method } }, entry.method),
+        el("div", { className: `${NS}network-name`, title: entry.url }, shortUrl(entry.url)),
+        el("div", { className: `${NS}network-status`, dataset: { ok: entry.ok ? "1" : "0" } }, entry.status || "…"),
+        el("div", { className: `${NS}network-meta` }, formatBytes(entry.size)),
+        el("div", { className: `${NS}network-meta` }, entry.time ? entry.time + " ms" : "…"),
+      );
       netListEl.appendChild(row);
     }
   }
@@ -750,34 +660,23 @@
   function showNetwork() {
     currentTab = "Network";
     clear(main);
-    clear(sidebar);
-    content.removeAttribute("data-no-sidebar");
-
+    clear(detail);
+    detail.style.display = "";
     installNetworkIntercept();
 
-    // Also seed with performance resource timings
     try {
       for (const entry of performance.getEntriesByType("resource")) {
         if (networkLog.some((e) => e.url === entry.name)) continue;
         networkLog.push({
-          id: crypto.randomUUID(),
-          method: "GET",
-          url: entry.name,
-          status: 200,
-          type: entry.initiatorType || "resource",
-          size: entry.transferSize || 0,
-          time: Math.round(entry.duration),
-          ok: true,
+          id: crypto.randomUUID(), method: "GET", url: entry.name,
+          status: 200, type: entry.initiatorType || "resource",
+          size: entry.transferSize || 0, time: Math.round(entry.duration), ok: true,
         });
       }
     } catch {}
 
-    const toolbar = el("div", { className: `${NS}net-toolbar` });
-    const search = el("input", {
-      className: `${NS}search`,
-      placeholder: "Filter requests…",
-      style: { margin: "0", flex: "1", maxWidth: "280px" },
-    });
+    const toolbar = el("div", { className: `${NS}toolbar` });
+    const search = el("input", { className: `${NS}search`, placeholder: "Filter…" });
     const clearBtn = el("button", { className: `${NS}action`, style: { margin: "0" } }, "Clear");
     toolbar.append(search, clearBtn);
     main.appendChild(toolbar);
@@ -785,35 +684,24 @@
     netListEl = el("div", { className: `${NS}net-list` });
     main.appendChild(netListEl);
 
-    search.addEventListener("input", () => {
-      netFilter = search.value.trim();
-      renderNetworkList();
-    });
-    clearBtn.onclick = () => {
-      networkLog = [];
-      renderNetworkList();
-    };
-
+    search.addEventListener("input", () => { netFilter = search.value.trim(); renderNetworkList(); });
+    clearBtn.onclick = () => { networkLog = []; renderNetworkList(); };
     renderNetworkList();
 
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "Network"));
-    sidebar.appendChild(
-      el("div", { className: `${NS}side-text` }, `${networkLog.length} requests · Live fetch + XHR intercept active`)
-    );
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, "Network"));
+    detail.appendChild(el("div", { className: `${NS}side-text` }, `${networkLog.length} requests · live intercept`));
   }
 
-  /* ────────────────────────────────────────────
-   * APPLICATION / STORAGE
-   * ──────────────────────────────────────────── */
+  /* ── Application ── */
 
   function showApplication() {
     currentTab = "Application";
     clear(main);
-    clear(sidebar);
-    content.removeAttribute("data-no-sidebar");
+    clear(detail);
+    detail.style.display = "";
 
-    const toolbar = el("div", { className: `${NS}net-toolbar` });
-    const select = el("select", { className: `${NS}select`, style: { margin: "0", width: "auto", minWidth: "140px" } });
+    const toolbar = el("div", { className: `${NS}toolbar` });
+    const select = el("select", { className: `${NS}select`, style: { margin: "0", width: "auto", minWidth: "130px" } });
     for (const opt of ["localStorage", "sessionStorage", "cookies"]) {
       select.appendChild(el("option", { value: opt }, opt));
     }
@@ -827,35 +715,27 @@
     const render = () => {
       clear(list);
       const kind = select.value;
-
       if (kind === "cookies") {
         const cookies = document.cookie ? document.cookie.split("; ") : [];
-        if (!cookies.length) {
-          list.appendChild(el("div", { className: `${NS}empty` }, "No cookies."));
-          return;
-        }
+        if (!cookies.length) { list.appendChild(el("div", { className: `${NS}empty` }, "No cookies.")); return; }
         for (const c of cookies) {
           const [k, ...rest] = c.split("=");
           const row = el("div", { className: `${NS}storage-row` });
           row.append(
             el("div", { className: `${NS}storage-key` }, k),
-            el("div", { className: `${NS}storage-val` }, rest.join("=").slice(0, 120)),
-            el("div", {}, "")
+            el("div", { className: `${NS}storage-val` }, rest.join("=").slice(0, 100)),
+            el("div", {}, ""),
           );
           list.appendChild(row);
         }
         return;
       }
-
       const store = kind === "localStorage" ? localStorage : sessionStorage;
       const keys = Object.keys(store);
-      if (!keys.length) {
-        list.appendChild(el("div", { className: `${NS}empty` }, `No ${kind} entries.`));
-        return;
-      }
+      if (!keys.length) { list.appendChild(el("div", { className: `${NS}empty` }, `No ${kind} entries.`)); return; }
       for (const key of keys) {
         const row = el("div", { className: `${NS}storage-row` });
-        const del = el("button", { className: `${NS}action`, style: { margin: "0", padding: "2px 8px" } }, "×");
+        const del = el("button", { className: `${NS}action`, style: { margin: "0", padding: "2px 6px" } }, "×");
         del.onclick = async () => {
           if (!(await authenticate())) return;
           store.removeItem(key);
@@ -863,8 +743,8 @@
         };
         row.append(
           el("div", { className: `${NS}storage-key`, title: key }, key),
-          el("div", { className: `${NS}storage-val`, title: store.getItem(key) }, (store.getItem(key) || "").slice(0, 120)),
-          del
+          el("div", { className: `${NS}storage-val`, title: store.getItem(key) }, (store.getItem(key) || "").slice(0, 100)),
+          del,
         );
         list.appendChild(row);
       }
@@ -884,76 +764,58 @@
       }
       render();
     };
-
     render();
 
-    sidebar.appendChild(el("div", { className: `${NS}side-heading` }, "Application"));
-    sidebar.appendChild(
-      el("div", { className: `${NS}side-text` }, "Inspect and clear storage. Destructive actions need the password.")
-    );
-    sidebar.appendChild(
-      el("div", { className: `${NS}side-text` }, `DevTools DB: ${DB_NAME}`)
-    );
+    detail.appendChild(el("div", { className: `${NS}side-heading` }, "Application"));
+    detail.appendChild(el("div", { className: `${NS}side-text` }, "Storage inspector. Destructive actions need password."));
   }
 
-  /* ────────────────────────────────────────────
-   * SETTINGS
-   * ──────────────────────────────────────────── */
+  /* ── Settings + cloaking ── */
 
   function showSettings() {
     currentTab = "Settings";
     clear(main);
-    clear(sidebar);
-    content.setAttribute("data-no-sidebar", "");
+    clear(detail);
+    detail.style.display = "none";
 
     const container = el("div", { className: `${NS}settings` });
 
-    const dockLabel = el("label", { className: `${NS}label` }, "Dock position");
-    const dock = el("select", { className: `${NS}select` });
-    for (const [v, t] of [["float", "Floating"], ["bottom", "Bottom"], ["right", "Right"]]) {
-      const o = el("option", { value: v }, t);
-      if (state.dock === v) o.selected = true;
-      dock.appendChild(o);
-    }
-
     const titleLabel = el("label", { className: `${NS}label` }, "Title override");
-    const title = el("input", {
-      className: `${NS}input`,
-      value: state.titleOverride || "",
-      placeholder: "Custom document title",
-    });
+    const title = el("input", { className: `${NS}input`, value: state.titleOverride || "", placeholder: "Custom document title" });
 
     const faviconLabel = el("label", { className: `${NS}label` }, "Favicon URL");
-    const favicon = el("input", {
-      className: `${NS}input`,
-      value: state.faviconOverride || "",
-      placeholder: "https://example.com/favicon.ico",
-    });
+    const favicon = el("input", { className: `${NS}input`, value: state.faviconOverride || "", placeholder: "https://example.com/favicon.ico" });
+
+    const cloakTitleLabel = el("label", { className: `${NS}label` }, "Cloak title (for blob / about:blank)");
+    const cloakTitle = el("input", { className: `${NS}input`, value: state.cloakTitle || "", placeholder: "Google" });
+
+    const cloakFavLabel = el("label", { className: `${NS}label` }, "Cloak favicon URL");
+    const cloakFav = el("input", { className: `${NS}input`, value: state.cloakFavicon || "", placeholder: "https://www.google.com/favicon.ico" });
 
     const scriptLabel = el("label", { className: `${NS}label` }, "Auto script (URL or JS)");
-    const script = el("textarea", {
-      className: `${NS}textarea`,
-      placeholder: "https://example.com/script.js\n\nor\n\nconsole.log('hello')",
-    });
+    const script = el("textarea", { className: `${NS}textarea`, placeholder: "https://…/script.js  or  console.log('hi')" });
 
     const save = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Save");
     save.onclick = async () => {
-      state.dock = dock.value;
       state.titleOverride = title.value.trim() || null;
       state.faviconOverride = favicon.value.trim() || null;
+      state.cloakTitle = cloakTitle.value.trim() || null;
+      state.cloakFavicon = cloakFav.value.trim() || null;
       if (script.value.trim()) {
         addScript(script.value);
         script.value = "";
       }
       applyIdentity();
-      applyDock();
       await saveState();
       save.textContent = "Saved ✓";
       setTimeout(() => (save.textContent = "Save"), 1200);
     };
 
-    const cloakBtn = el("button", { className: `${NS}action` }, "Open about:blank cloak");
-    cloakBtn.onclick = openCloak;
+    const blobBtn = el("button", { className: `${NS}action` }, "Open blob cloaked");
+    blobBtn.onclick = openBlobCloak;
+
+    const aboutBtn = el("button", { className: `${NS}action` }, "Open about:blank cloaked");
+    aboutBtn.onclick = openAboutCloak;
 
     const enabledLabel = el("label", { className: `${NS}toggle` });
     const enabled = el("input", { type: "checkbox" });
@@ -966,18 +828,16 @@
     });
     enabledLabel.append(enabled, document.createTextNode(" Enable n3xn DevTools"));
 
-    const shortcutNote = el(
-      "div",
-      { className: `${NS}side-text`, style: { marginTop: "16px" } },
-      "Shortcuts: F12 or Ctrl+Shift+I to toggle · Esc to close panel"
-    );
+    const note = el("div", { className: `${NS}side-text`, style: { marginTop: "12px" } },
+      "Shortcuts: F12 / Ctrl+Shift+I toggle · Esc close · Drag left edge to resize");
 
     container.append(
-      dockLabel, dock,
       titleLabel, title,
       faviconLabel, favicon,
+      cloakTitleLabel, cloakTitle,
+      cloakFavLabel, cloakFav,
       scriptLabel, script,
-      save, cloakBtn, enabledLabel, shortcutNote
+      save, blobBtn, aboutBtn, enabledLabel, note,
     );
     main.appendChild(container);
   }
@@ -986,10 +846,10 @@
     source = source.trim();
     if (!source) return;
     if (/^https?:\/\//i.test(source)) {
-      const script = document.createElement("script");
-      script.src = source;
-      script.async = false;
-      document.head.appendChild(script);
+      const s = document.createElement("script");
+      s.src = source;
+      s.async = false;
+      document.head.appendChild(s);
       state.scripts.push({ type: "url", value: source });
       return;
     }
@@ -1000,10 +860,6 @@
       console.error("n3xn DevTools script:", error);
     }
   }
-
-  /* ────────────────────────────────────────────
-   * IDENTITY + CLOAK
-   * ──────────────────────────────────────────── */
 
   function applyIdentity() {
     if (state.titleOverride !== null) document.title = state.titleOverride;
@@ -1018,43 +874,52 @@
     }
   }
 
-  function openCloak() {
-    const popup = window.open("about:blank", "_blank");
-    if (!popup) {
-      window.alert("The browser blocked the popup.");
-      return;
-    }
-    const title = state.cloakTitle || state.titleOverride || document.title;
+  /** Build cloaked shell HTML */
+  function buildCloakHtml(targetUrl) {
+    const title = state.cloakTitle || state.titleOverride || document.title || "New Tab";
     const favicon = state.cloakFavicon || state.faviconOverride || "";
-    const html = `<!doctype html>
+    return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHTML(title)}</title>
 ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#000}iframe{border:0;position:fixed;inset:0;width:100%;height:100%}</style>
 </head>
-<body style="margin:0;overflow:hidden;background:#000">
-<iframe
-  src="${escapeHTML(location.href)}"
-  style="position:fixed;inset:0;width:100%;height:100%;border:0"
-  allow="
-    accelerometer; autoplay; camera; clipboard-read; clipboard-write;
-    encrypted-media; fullscreen; geolocation; gyroscope;
-    microphone; midi; payment; picture-in-picture;
-    screen-wake-lock; web-share; xr-spatial-tracking
-  "
-  allowfullscreen
-></iframe>
+<body>
+<iframe src="${escapeHTML(targetUrl)}" allow="accelerometer;autoplay;camera;clipboard-read;clipboard-write;encrypted-media;fullscreen;geolocation;gyroscope;microphone;midi;payment;picture-in-picture;screen-wake-lock;web-share;xr-spatial-tracking" allowfullscreen></iframe>
 </body>
 </html>`;
+  }
+
+  /** about:blank cloak (popup) */
+  function openAboutCloak() {
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) {
+      window.alert("Popup blocked.");
+      return;
+    }
+    const html = buildCloakHtml(location.href);
     popup.document.open();
     popup.document.write(html);
     popup.document.close();
   }
 
-  /* ────────────────────────────────────────────
-   * TAB ROUTER
-   * ──────────────────────────────────────────── */
+  /** blob: URL cloak — navigates current tab or opens new */
+  function openBlobCloak() {
+    const html = buildCloakHtml(location.href);
+    const blob = new Blob([html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    // Prefer new tab so the original session stays
+    const w = window.open(url, "_blank");
+    if (!w) {
+      // Fallback: navigate this tab
+      location.href = url;
+    }
+  }
+
+  /* ── Tabs ── */
 
   function activateTab(tab) {
     switch (tab) {
@@ -1068,164 +933,90 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
     }
   }
 
-  /* ────────────────────────────────────────────
-   * PANEL OPEN / CLOSE / DOCK
-   * ──────────────────────────────────────────── */
+  /* ── Open / close sidebar (pushes page) ── */
+
+  function setSidebarWidth(px) {
+    const w = Math.max(280, Math.min(window.innerWidth - 80, px));
+    state.sidebarWidth = w;
+    document.documentElement.style.setProperty("--n3xn-sidebar-width", w + "px");
+    if (root) root.style.width = w + "px";
+  }
 
   function openPanel() {
-    panel.classList.add(`${NS}open`);
-    launcher.classList.add(`${NS}hidden`);
+    state.open = true;
+    root.setAttribute("data-open", "");
+    document.documentElement.classList.add("n3xn-devtools-open");
+    setSidebarWidth(state.sidebarWidth || DEFAULT_WIDTH);
     activateTab(currentTab);
+    saveState();
   }
 
   function closePanel() {
-    panel.classList.remove(`${NS}open`);
-    launcher.classList.remove(`${NS}hidden`);
+    state.open = false;
+    root.removeAttribute("data-open");
+    document.documentElement.classList.remove("n3xn-devtools-open");
     hideHighlight();
     if (editor) {
       try { editor.dispose(); } catch {}
       editor = null;
       editorReady = false;
     }
+    saveState();
   }
 
   function togglePanel() {
-    if (panel.classList.contains(`${NS}open`)) closePanel();
+    if (state.open) closePanel();
     else openPanel();
   }
 
-  function applyDock() {
-    panel.dataset.dock = state.dock === "float" ? "" : state.dock;
-    if (state.dock === "float") {
-      if (state.panelW) panel.style.width = state.panelW + "px";
-      if (state.panelH) panel.style.height = state.panelH + "px";
-      if (state.panelX != null) {
-        panel.style.left = state.panelX + "px";
-        panel.style.right = "auto";
-      }
-      if (state.panelY != null) {
-        panel.style.top = state.panelY + "px";
-        panel.style.bottom = "auto";
-      }
-    } else {
-      panel.style.width = "";
-      panel.style.height = "";
-      panel.style.left = "";
-      panel.style.top = "";
-      panel.style.right = "";
-      panel.style.bottom = "";
+  /* ── Resize handle ── */
+
+  function setupResize(handle) {
+    let startX = 0;
+    let startW = 0;
+
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      startX = e.clientX;
+      startW = state.sidebarWidth || DEFAULT_WIDTH;
+      handle.setAttribute("data-active", "");
+      handle.setPointerCapture(e.pointerId);
+
+      const onMove = (ev) => {
+        // Dragging left edge: moving left increases width
+        const dx = startX - ev.clientX;
+        setSidebarWidth(startW + dx);
+        if (editor && editorReady) {
+          try { editor.layout(); } catch {}
+        }
+      };
+      const onUp = () => {
+        handle.removeAttribute("data-active");
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        saveState();
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+    });
+  }
+
+  /* ── Capture console ── */
+
+  function captureConsole() {
+    const buffer = (window[`${NS}logBuffer`] = []);
+    for (const level of ["log", "info", "warn", "error", "debug"]) {
+      originalConsole[level] = console[level];
+      console[level] = function (...args) {
+        buffer.push({ level, args, time: Date.now() });
+        if (buffer.length > 300) buffer.shift();
+        return originalConsole[level].apply(console, args);
+      };
     }
   }
 
-  /* ────────────────────────────────────────────
-   * DRAGGING + RESIZE
-   * ──────────────────────────────────────────── */
-
-  function makeDraggable(node, onEnd) {
-    let dragging = false;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    node.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      if (event.target.closest("button, input, select, textarea, a")) return;
-      dragging = true;
-      const rect = node.getBoundingClientRect();
-      offsetX = event.clientX - rect.left;
-      offsetY = event.clientY - rect.top;
-      node.setPointerCapture(event.pointerId);
-      node.classList.add(`${NS}dragging`);
-    });
-
-    node.addEventListener("pointermove", (event) => {
-      if (!dragging) return;
-      const width = node.offsetWidth;
-      const height = node.offsetHeight;
-      const x = Math.max(4, Math.min(window.innerWidth - width - 4, event.clientX - offsetX));
-      const y = Math.max(4, Math.min(window.innerHeight - height - 4, event.clientY - offsetY));
-      node.style.left = `${x}px`;
-      node.style.top = `${y}px`;
-      node.style.right = "auto";
-      node.style.bottom = "auto";
-    });
-
-    node.addEventListener("pointerup", (event) => {
-      if (!dragging) return;
-      dragging = false;
-      node.classList.remove(`${NS}dragging`);
-      try { node.releasePointerCapture(event.pointerId); } catch {}
-      if (onEnd) onEnd();
-    });
-  }
-
-  function makeResizable(panelEl) {
-    const handles = [
-      { cls: `${NS}resize-n`, edges: ["top"] },
-      { cls: `${NS}resize-w`, edges: ["left"] },
-      { cls: `${NS}resize-nw`, edges: ["top", "left"] },
-    ];
-
-    for (const h of handles) {
-      const handle = el("div", { className: `${NS}resize ${h.cls}` });
-      panelEl.appendChild(handle);
-
-      let startX, startY, startW, startH, startL, startT;
-
-      handle.addEventListener("pointerdown", (e) => {
-        if (state.dock !== "float") return;
-        e.preventDefault();
-        e.stopPropagation();
-        startX = e.clientX;
-        startY = e.clientY;
-        const r = panelEl.getBoundingClientRect();
-        startW = r.width;
-        startH = r.height;
-        startL = r.left;
-        startT = r.top;
-        handle.setPointerCapture(e.pointerId);
-
-        const onMove = (ev) => {
-          let w = startW;
-          let h = startH;
-          let l = startL;
-          let t = startT;
-          if (h.edges.includes("left")) {
-            const dx = ev.clientX - startX;
-            w = Math.max(420, startW - dx);
-            l = startL + (startW - w);
-          }
-          if (h.edges.includes("top")) {
-            const dy = ev.clientY - startY;
-            h = Math.max(280, startH - dy);
-            t = startT + (startH - h);
-          }
-          panelEl.style.width = w + "px";
-          panelEl.style.height = h + "px";
-          panelEl.style.left = l + "px";
-          panelEl.style.top = t + "px";
-          panelEl.style.right = "auto";
-          panelEl.style.bottom = "auto";
-        };
-
-        const onUp = () => {
-          handle.removeEventListener("pointermove", onMove);
-          handle.removeEventListener("pointerup", onUp);
-          state.panelW = panelEl.offsetWidth;
-          state.panelH = panelEl.offsetHeight;
-          state.panelX = parseInt(panelEl.style.left, 10) || null;
-          state.panelY = parseInt(panelEl.style.top, 10) || null;
-          saveState();
-        };
-
-        handle.addEventListener("pointermove", onMove);
-        handle.addEventListener("pointerup", onUp);
-      });
-    }
-  }
-
-  /* ────────────────────────────────────────────
-   * BUILD UI
-   * ──────────────────────────────────────────── */
+  /* ── Build UI ── */
 
   function build() {
     if (document.getElementById(`${NS}root`)) return;
@@ -1233,6 +1024,12 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
     loadCSS();
     installNetworkIntercept();
     captureConsole();
+
+    // CSS variable for page push
+    document.documentElement.style.setProperty(
+      "--n3xn-sidebar-width",
+      (state.sidebarWidth || DEFAULT_WIDTH) + "px",
+    );
 
     root = el("div", { id: `${NS}root`, className: `${NS}root` });
 
@@ -1244,30 +1041,27 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
 
     panel = el("section", { className: `${NS}panel` });
 
+    const resizeHandle = el("div", { className: `${NS}resize-handle` });
+    panel.appendChild(resizeHandle);
+    setupResize(resizeHandle);
+
     const titlebar = el("div", { className: `${NS}titlebar` });
     const title = el("span", { className: `${NS}title` });
-    title.innerHTML = `<span>n3xn</span> DevTools`;
-    const dockBtn = el("button", {
+    title.innerHTML = `<b>n3xn</b> DevTools`;
+    const cloakBtn = el("button", {
       className: `${NS}title-button`,
       type: "button",
-      title: "Cycle dock (float → bottom → right)",
+      title: "Open blob cloaked",
     }, "⧉");
-    const minimize = el("button", {
-      className: `${NS}title-button`,
-      type: "button",
-      title: "Hide",
-    }, "—");
     const close = el("button", {
       className: `${NS}title-button`,
       type: "button",
       title: "Close",
-      dataset: { danger: "1" },
     }, "×");
-    titlebar.append(title, dockBtn, minimize, close);
+    titlebar.append(title, cloakBtn, close);
 
     const tabbar = el("div", { className: `${NS}tabs` });
     const tabNames = ["Elements", "Console", "Sources", "Network", "Application", "Settings"];
-
     for (const tabName of tabNames) {
       const button = el("button", { className: `${NS}tab`, type: "button" }, tabName);
       button.dataset.tab = tabName;
@@ -1283,112 +1077,35 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
 
     content = el("div", { className: `${NS}content` });
     main = el("div", { className: `${NS}main` });
-    sidebar = el("aside", { className: `${NS}sidebar` });
-    content.append(main, sidebar);
+    detail = el("div", { className: `${NS}detail` });
+    content.append(main, detail);
     panel.append(titlebar, tabbar, content);
     root.append(launcher, panel);
     document.documentElement.appendChild(root);
 
-    launcher.addEventListener("click", () => {
-      if (launcher.classList.contains(`${NS}dragging`)) return;
-      openPanel();
-    });
+    launcher.addEventListener("click", openPanel);
     close.addEventListener("click", closePanel);
-    minimize.addEventListener("click", closePanel);
-
-    dockBtn.onclick = () => {
-      const order = ["float", "bottom", "right"];
-      const i = order.indexOf(state.dock);
-      state.dock = order[(i + 1) % order.length];
-      applyDock();
-      saveState();
-    };
-
-    makeDraggable(launcher);
-    makeDraggable(titlebar, () => {
-      if (state.dock !== "float") return;
-      state.panelX = parseInt(panel.style.left, 10) || null;
-      state.panelY = parseInt(panel.style.top, 10) || null;
-      saveState();
-    });
-    // Make the whole panel follow titlebar drag when floating
-    titlebar.addEventListener("pointerdown", (e) => {
-      if (state.dock !== "float") return;
-      if (e.target.closest("button")) return;
-      // reuse makeDraggable on panel via titlebar offsets
-    });
-
-    // Better: drag panel by titlebar
-    (function enablePanelDrag() {
-      let dragging = false, ox = 0, oy = 0;
-      titlebar.addEventListener("pointerdown", (e) => {
-        if (state.dock !== "float") return;
-        if (e.target.closest("button")) return;
-        dragging = true;
-        const r = panel.getBoundingClientRect();
-        ox = e.clientX - r.left;
-        oy = e.clientY - r.top;
-        titlebar.setPointerCapture(e.pointerId);
-      });
-      titlebar.addEventListener("pointermove", (e) => {
-        if (!dragging) return;
-        const x = Math.max(0, Math.min(window.innerWidth - 100, e.clientX - ox));
-        const y = Math.max(0, Math.min(window.innerHeight - 40, e.clientY - oy));
-        panel.style.left = x + "px";
-        panel.style.top = y + "px";
-        panel.style.right = "auto";
-        panel.style.bottom = "auto";
-      });
-      titlebar.addEventListener("pointerup", () => {
-        if (!dragging) return;
-        dragging = false;
-        state.panelX = parseInt(panel.style.left, 10) || null;
-        state.panelY = parseInt(panel.style.top, 10) || null;
-        saveState();
-      });
-    })();
-
-    makeResizable(panel);
+    cloakBtn.addEventListener("click", openBlobCloak);
 
     for (const item of tabbar.querySelectorAll(`.${NS}tab`)) {
       item.classList.toggle(`${NS}active`, item.dataset.tab === "Elements");
     }
 
-    applyDock();
-
     if (!state.enabled) root.style.display = "none";
 
-    // Keyboard
+    // Restore open state
+    if (state.open) openPanel();
+
     window.addEventListener("keydown", (e) => {
       if (e.key === "F12" || (e.ctrlKey && e.shiftKey && (e.key === "I" || e.key === "i"))) {
         e.preventDefault();
         togglePanel();
       }
-      if (e.key === "Escape" && panel.classList.contains(`${NS}open`)) {
-        closePanel();
-      }
+      if (e.key === "Escape" && state.open) closePanel();
     });
   }
 
-  /* ────────────────────────────────────────────
-   * CAPTURE PAGE CONSOLE
-   * ──────────────────────────────────────────── */
-
-  function captureConsole() {
-    const buffer = (window[`${NS}logBuffer`] = []);
-    for (const level of ["log", "info", "warn", "error", "debug"]) {
-      originalConsole[level] = console[level];
-      console[level] = function (...args) {
-        buffer.push({ level, args, time: Date.now() });
-        if (buffer.length > 300) buffer.shift();
-        return originalConsole[level].apply(console, args);
-      };
-    }
-  }
-
-  /* ────────────────────────────────────────────
-   * START
-   * ──────────────────────────────────────────── */
+  /* ── Start ── */
 
   async function start() {
     await loadState();

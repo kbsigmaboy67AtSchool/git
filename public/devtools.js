@@ -2,194 +2,156 @@
   "use strict";
 
   /*
-   * ============================================================
-   * RANDOM NAMESPACE
-   * ============================================================
+   * n3xn DevTools
    *
-   * Nothing here uses generic IDs such as "devtools".
+   * Client-side development overlay.
+   * The script intentionally uses randomized internal identifiers
+   * so it is unlikely to collide with the proxied document.
    */
 
-  const random =
-    crypto.randomUUID()
-      .replaceAll("-", "");
+  const UUID = crypto.randomUUID().replaceAll("-", "");
+  const NS = `__n3xn_${UUID}_`;
 
-  const NS =
-    `__n3xn_dt_${random}_`;
+  const DB_NAME = `${NS}db`;
+  const DB_STORE = `${NS}state`;
 
-  const DB_NAME =
-    `${NS}indexeddb`;
+  const RAW_BASE =
+    "https://raw.githubusercontent.com/kbsigmaboy67AtSchool/git/main/public/";
 
-  const DB_STORE =
-    `${NS}settings`;
+  const CSS_URL = `${RAW_BASE}devtools.css`;
 
-  const STYLE_ID =
-    `${NS}style`;
-
-  /*
-   * ============================================================
-   * STATE
-   * ============================================================
-   */
+  const MONACO_LOADER =
+    "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js";
 
   const state = {
     enabled: true,
-
     titleOverride: null,
-
     faviconOverride: null,
-
-    scripts: [],
-
     cloakTitle: null,
-
     cloakFavicon: null,
-
+    scripts: [],
     devAuthenticated: false,
   };
 
+  let root = null;
+  let launcher = null;
+  let panel = null;
+  let main = null;
+  let sidebar = null;
+  let editor = null;
+  let editorReady = false;
+  let currentTab = "Elements";
+
   /*
-   * ============================================================
+   * ------------------------------------------------------------
    * INDEXEDDB
-   * ============================================================
+   * ------------------------------------------------------------
    */
 
   function openDB() {
-    return new Promise(
-      (resolve, reject) => {
-        const request =
-          indexedDB.open(
-            DB_NAME,
-            1,
-          );
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
 
-        request.onupgradeneeded =
-          () => {
-            if (
-              !request.result.objectStoreNames.contains(
-                DB_STORE,
-              )
-            ) {
-              request.result.createObjectStore(
-                DB_STORE,
-              );
-            }
-          };
+      req.onupgradeneeded = () => {
+        const db = req.result;
 
-        request.onsuccess =
-          () => resolve(request.result);
+        if (!db.objectStoreNames.contains(DB_STORE)) {
+          db.createObjectStore(DB_STORE);
+        }
+      };
 
-        request.onerror =
-          () => reject(request.error);
-      },
-    );
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
   }
 
   async function loadState() {
     try {
-      const db =
-        await openDB();
+      const db = await openDB();
 
-      const value =
-        await new Promise(
-          (resolve, reject) => {
-            const tx =
-              db.transaction(
-                DB_STORE,
-                "readonly",
-              );
+      const value = await new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, "readonly");
+        const req = tx.objectStore(DB_STORE).get("state");
 
-            const request =
-              tx.objectStore(
-                DB_STORE,
-              ).get("state");
-
-            request.onsuccess =
-              () => resolve(request.result);
-
-            request.onerror =
-              () => reject(request.error);
-          },
-        );
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
 
       if (value) {
-        Object.assign(
-          state,
-          value,
-        );
+        Object.assign(state, value);
       }
     } catch {
-      /*
-       * IndexedDB may be disabled by the
-       * embedding environment.
-       */
+      // IndexedDB unavailable; continue without persistence.
     }
   }
 
   async function saveState() {
     try {
-      const db =
-        await openDB();
+      const db = await openDB();
 
-      const tx =
-        db.transaction(
-          DB_STORE,
-          "readwrite",
-        );
+      const tx = db.transaction(DB_STORE, "readwrite");
 
-      tx.objectStore(
-        DB_STORE,
-      ).put(
+      tx.objectStore(DB_STORE).put(
         structuredClone(state),
         "state",
       );
     } catch {
-      /*
-       * Non-fatal.
-       */
+      // Persistence failure is non-fatal.
     }
   }
 
   /*
-   * ============================================================
-   * HELPERS
-   * ============================================================
+   * ------------------------------------------------------------
+   * CSS
+   * ------------------------------------------------------------
    */
 
-  function create(
-    tag,
-    options = {},
-    text = "",
-  ) {
-    const element =
-      document.createElement(tag);
+  function loadCSS() {
+    if (document.getElementById(`${NS}css`)) {
+      return;
+    }
 
-    for (
-      const [key, value]
-      of Object.entries(options)
-    ) {
+    const link = document.createElement("link");
+
+    link.id = `${NS}css`;
+    link.rel = "stylesheet";
+    link.href = CSS_URL;
+
+    document.head.appendChild(link);
+  }
+
+  /*
+   * ------------------------------------------------------------
+   * HELPERS
+   * ------------------------------------------------------------
+   */
+
+  function el(tag, props = {}, text = "") {
+    const node = document.createElement(tag);
+
+    for (const [key, value] of Object.entries(props)) {
       if (key === "className") {
-        element.className = value;
-      } else if (
-        key === "textContent"
-      ) {
-        element.textContent = value;
-      } else if (
-        key in element
-      ) {
-        element[key] = value;
+        node.className = value;
+      } else if (key === "dataset") {
+        Object.assign(node.dataset, value);
+      } else if (key in node) {
+        node[key] = value;
       } else {
-        element.setAttribute(
-          key,
-          value,
-        );
+        node.setAttribute(key, value);
       }
     }
 
     if (text) {
-      element.textContent = text;
+      node.textContent = text;
     }
 
-    return element;
+    return node;
+  }
+
+  function clear(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
   }
 
   function escapeHTML(value) {
@@ -202,105 +164,48 @@
   }
 
   /*
-   * ============================================================
-   * TITLE / FAVICON
-   * ============================================================
-   */
-
-  function applyIdentity() {
-    if (
-      state.titleOverride !== null
-    ) {
-      document.title =
-        state.titleOverride;
-    }
-
-    if (
-      state.faviconOverride !== null
-    ) {
-      let favicon =
-        document.querySelector(
-          'link[rel~="icon"]',
-        );
-
-      if (!favicon) {
-        favicon =
-          document.createElement(
-            "link",
-          );
-
-        favicon.rel = "icon";
-
-        document.head.appendChild(
-          favicon,
-        );
-      }
-
-      favicon.href =
-        state.faviconOverride;
-    }
-  }
-
-  /*
-   * ============================================================
+   * ------------------------------------------------------------
    * DEVTOOLS AUTH
-   * ============================================================
+   * ------------------------------------------------------------
    */
 
-  async function authenticateDevTools() {
-    if (
-      state.devAuthenticated
-    ) {
+  async function authenticate() {
+    if (state.devAuthenticated) {
       return true;
     }
 
-    const password =
-      window.prompt(
-        "n3xn DevTools password:",
-      );
+    const password = window.prompt(
+      "n3xn DevTools password:",
+    );
 
     if (password === null) {
       return false;
     }
 
     try {
-      const response =
-        await fetch(
-          "/devtools-auth",
-          {
-            method: "POST",
-
-            credentials: "same-origin",
-
-            headers: {
-              "Content-Type":
-                "application/json",
-            },
-
-            body: JSON.stringify({
-              password,
-            }),
+      const response = await fetch(
+        "/devtools-auth",
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
           },
-        );
+          body: JSON.stringify({
+            password,
+          }),
+        },
+      );
 
-      const result =
-        await response.json();
+      const result = await response.json();
 
-      if (
-        response.ok &&
-        result.ok
-      ) {
-        state.devAuthenticated =
-          true;
-
+      if (response.ok && result.ok) {
+        state.devAuthenticated = true;
         await saveState();
-
         return true;
       }
     } catch {
-      /*
-       * Network failure.
-       */
+      // Network failure.
     }
 
     window.alert(
@@ -311,115 +216,233 @@
   }
 
   /*
-   * ============================================================
-   * MAIN WINDOW
-   * ============================================================
+   * ------------------------------------------------------------
+   * MONACO
+   * ------------------------------------------------------------
    */
 
-  let root;
-  let launcher;
-  let windowPanel;
+  function loadMonaco() {
+    return new Promise((resolve, reject) => {
+      if (window.monaco) {
+        resolve(window.monaco);
+        return;
+      }
 
-  let mainArea;
-  let sideArea;
-  let tabs;
+      if (window.require && window.require.config) {
+        window.require(
+          ["vs/editor/editor.main"],
+          monaco => resolve(monaco),
+        );
 
-  function openPanel() {
-    windowPanel.classList.add(
-      "n3xn-open",
-    );
+        return;
+      }
+
+      const script = document.createElement("script");
+
+      script.src = MONACO_LOADER;
+      script.async = true;
+
+      script.onload = () => {
+        if (!window.require) {
+          reject(
+            new Error(
+              "Monaco loader did not initialize.",
+            ),
+          );
+
+          return;
+        }
+
+        window.require.config({
+          paths: {
+            vs:
+              "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs",
+          },
+        });
+
+        window.require(
+          ["vs/editor/editor.main"],
+          monaco => resolve(monaco),
+        );
+      };
+
+      script.onerror = () => {
+        reject(
+          new Error(
+            "Unable to load Monaco.",
+          ),
+        );
+      };
+
+      document.head.appendChild(script);
+    });
   }
 
-  function closePanel() {
-    windowPanel.classList.remove(
-      "n3xn-open",
+  async function createMonaco(value, language = "html") {
+    clear(main);
+
+    const host = el(
+      "div",
+      {
+        className: `${NS}editor`,
+      },
     );
-  }
 
-  /*
-   * ============================================================
-   * DOM INSPECTOR
-   * ============================================================
-   */
+    main.appendChild(host);
 
-  function showElements() {
-    mainArea.innerHTML = "";
+    try {
+      const monaco = await loadMonaco();
 
-    sideArea.innerHTML = "";
-
-    const pre =
-      create(
-        "pre",
+      editor = monaco.editor.create(
+        host,
         {
-          className:
-            "n3xn-devtools-pre",
+          value,
+          language,
+          theme: "vs-dark",
+
+          automaticLayout: true,
+
+          minimap: {
+            enabled: true,
+          },
+
+          fontSize: 13,
+
+          lineNumbers: "on",
+
+          roundedSelection: false,
+
+          scrollBeyondLastLine: false,
+
+          wordWrap: "off",
+
+          padding: {
+            top: 8,
+          },
         },
       );
 
-    pre.textContent =
-      document.documentElement
-        .outerHTML;
+      editorReady = true;
 
-    mainArea.appendChild(pre);
+      return editor;
+    } catch (error) {
+      editorReady = false;
 
-    const info =
-      create("div");
+      const fallback = el(
+        "textarea",
+        {
+          className: `${NS}fallback-editor`,
+        },
+      );
 
-    info.innerHTML =
-      `<strong>DOM</strong>
-       <p>Live document structure.</p>`;
+      fallback.value = value;
 
-    sideArea.appendChild(info);
+      main.appendChild(fallback);
+
+      return fallback;
+    }
   }
 
   /*
-   * ============================================================
+   * ------------------------------------------------------------
+   * ELEMENTS
+   * ------------------------------------------------------------
+   */
+
+  async function showElements() {
+    currentTab = "Elements";
+
+    clear(main);
+    clear(sidebar);
+
+    const source =
+      document.documentElement.outerHTML;
+
+    await createMonaco(
+      source,
+      "html",
+    );
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-heading`,
+        },
+        "DOM Inspector",
+      ),
+    );
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-text`,
+        },
+        `${document.documentElement.children.length} top-level HTML nodes`,
+      ),
+    );
+  }
+
+  /*
+   * ------------------------------------------------------------
    * CONSOLE
-   * ============================================================
+   * ------------------------------------------------------------
    */
 
   function showConsole() {
-    mainArea.innerHTML = "";
+    currentTab = "Console";
 
-    sideArea.innerHTML = "";
+    clear(main);
+    clear(sidebar);
 
-    const wrapper =
-      create(
-        "div",
-        {
-          className:
-            "n3xn-devtools-console",
-        },
-      );
-
-    const output =
-      create(
-        "div",
-        {
-          className:
-            "n3xn-devtools-console-output",
-        },
-      );
-
-    const input =
-      create(
-        "textarea",
-        {
-          className:
-            "n3xn-devtools-console-input",
-          placeholder:
-            "JavaScript — DevTools password required",
-        },
-      );
-
-    wrapper.append(
-      output,
-      input,
+    const output = el(
+      "div",
+      {
+        className: `${NS}console-output`,
+      },
     );
 
-    mainArea.appendChild(
-      wrapper,
+    const input = el(
+      "textarea",
+      {
+        className: `${NS}console-input`,
+        placeholder:
+          "Enter JavaScript. Press Enter to run; Shift+Enter for newline.",
+      },
     );
+
+    main.appendChild(output);
+    main.appendChild(input);
+
+    const write = (value, type = "result") => {
+      const row = el(
+        "div",
+        {
+          className: `${NS}console-row ${NS}${type}`,
+        },
+      );
+
+      row.textContent =
+        typeof value === "string"
+          ? value
+          : (() => {
+              try {
+                return JSON.stringify(
+                  value,
+                  null,
+                  2,
+                );
+              } catch {
+                return String(value);
+              }
+            })();
+
+      output.appendChild(row);
+
+      output.scrollTop =
+        output.scrollHeight;
+    };
 
     input.addEventListener(
       "keydown",
@@ -433,273 +456,548 @@
 
         event.preventDefault();
 
-        if (
-          !(await authenticateDevTools())
-        ) {
+        const code = input.value.trim();
+
+        if (!code) {
           return;
         }
-
-        const source =
-          input.value;
 
         input.value = "";
 
-        const line =
-          create(
-            "div",
-            {
-              className:
-                "n3xn-devtools-console-line",
-            },
+        write(
+          `> ${code}`,
+          "command",
+        );
+
+        if (!(await authenticate())) {
+          write(
+            "Execution denied.",
+            "error",
           );
 
-        try {
-          /*
-           * Explicitly use the page's global
-           * execution environment.
-           */
-
-          const result =
-            (0, eval)(source);
-
-          line.textContent =
-            result === undefined
-              ? "undefined"
-              : String(result);
-        } catch (error) {
-          line.textContent =
-            String(error);
-        }
-
-        output.appendChild(line);
-
-        output.scrollTop =
-          output.scrollHeight;
-      },
-    );
-
-    sideArea.innerHTML =
-      `<strong>Console</strong>
-       <p>Execution is locked until DevTools authentication succeeds.</p>`;
-  }
-
-  /*
-   * ============================================================
-   * SOURCES
-   * ============================================================
-   */
-
-  function showSources() {
-    mainArea.innerHTML = "";
-
-    sideArea.innerHTML = "";
-
-    const editor =
-      create(
-        "textarea",
-        {
-          className:
-            "n3xn-devtools-field",
-          style:
-            "height:100%;resize:none;font-family:monospace;background:#1e1e1e;color:#ddd;border:0;border-radius:0",
-        },
-      );
-
-    editor.value =
-      document.documentElement
-        .outerHTML;
-
-    mainArea.appendChild(
-      editor,
-    );
-
-    const button =
-      create(
-        "button",
-        {
-          className:
-            "n3xn-devtools-action",
-        },
-        "Apply source",
-      );
-
-    button.onclick =
-      async () => {
-        if (
-          !(await authenticateDevTools())
-        ) {
           return;
         }
 
-        /*
-         * This deliberately requires the
-         * privileged DevTools password.
-         */
+        try {
+          /*
+           * Execute against the page's global
+           * environment.
+           */
+          const result =
+            (0, eval)(code);
 
-        const replacement =
-          editor.value;
+          write(
+            result === undefined
+              ? "undefined"
+              : result,
+          );
+        } catch (error) {
+          write(
+            error?.stack ||
+              String(error),
+            "error",
+          );
+        }
+      },
+    );
 
-        document.open();
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-heading`,
+        },
+        "Console",
+      ),
+    );
 
-        document.write(
-          replacement,
-        );
-
-        document.close();
-      };
-
-    sideArea.appendChild(
-      button,
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-text`,
+        },
+        "JavaScript execution requires the DevTools password.",
+      ),
     );
   }
 
   /*
-   * ============================================================
+   * ------------------------------------------------------------
+   * SOURCES
+   * ------------------------------------------------------------
+   */
+
+  async function showSources() {
+    currentTab = "Sources";
+
+    clear(main);
+    clear(sidebar);
+
+    const source =
+      document.documentElement.outerHTML;
+
+    const ed = await createMonaco(
+      source,
+      "html",
+    );
+
+    const apply = el(
+      "button",
+      {
+        className: `${NS}action`,
+      },
+      "Apply changes",
+    );
+
+    apply.onclick = async () => {
+      if (!(await authenticate())) {
+        return;
+      }
+
+      const replacement =
+        editorReady
+          ? editor.getValue()
+          : ed.value;
+
+      document.open();
+      document.write(replacement);
+      document.close();
+    };
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-heading`,
+        },
+        "Sources",
+      ),
+    );
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-text`,
+        },
+        "Edit the current HTML document. Applying changes requires DevTools authentication.",
+      ),
+    );
+
+    sidebar.appendChild(apply);
+  }
+
+  /*
+   * ------------------------------------------------------------
    * NETWORK
-   * ============================================================
+   * ------------------------------------------------------------
    */
 
   function showNetwork() {
-    mainArea.innerHTML = "";
+    currentTab = "Network";
 
-    sideArea.innerHTML = "";
+    clear(main);
+    clear(sidebar);
 
     const entries =
       performance.getEntriesByType(
         "resource",
       );
 
-    if (!entries.length) {
-      mainArea.appendChild(
-        create(
-          "pre",
-          {
-            className:
-              "n3xn-devtools-pre",
-          },
-          "No resource entries available.",
-        ),
-      );
+    const fragment =
+      document.createDocumentFragment();
 
-      return;
-    }
-
-    for (
-      const entry of entries
-    ) {
-      const row =
-        create(
-          "div",
-          {
-            className:
-              "n3xn-devtools-network-row",
-          },
-          entry.name,
-        );
-
-      mainArea.appendChild(
-        row,
-      );
-    }
-  }
-
-  /*
-   * ============================================================
-   * APPLICATION
-   * ============================================================
-   */
-
-  function showApplication() {
-    mainArea.innerHTML = "";
-
-    sideArea.innerHTML = "";
-
-    const pre =
-      create(
-        "pre",
+    for (const entry of entries) {
+      const row = el(
+        "div",
         {
-          className:
-            "n3xn-devtools-pre",
+          className: `${NS}network-row`,
         },
       );
 
-    pre.textContent =
-      [
-        "IndexedDB",
-        "",
-        `Database: ${DB_NAME}`,
-        `Store: ${DB_STORE}`,
-        "",
-        "Persistent n3xn DevTools settings are stored locally.",
-      ].join("\n");
+      const name = el(
+        "div",
+        {
+          className: `${NS}network-name`,
+        },
+        entry.name,
+      );
 
-    mainArea.appendChild(
-      pre,
+      const meta = el(
+        "div",
+        {
+          className: `${NS}network-meta`,
+        },
+        `${Math.round(entry.duration)} ms`,
+      );
+
+      row.append(name, meta);
+
+      fragment.appendChild(row);
+    }
+
+    if (!entries.length) {
+      fragment.appendChild(
+        el(
+          "div",
+          {
+            className: `${NS}empty`,
+          },
+          "No resource entries.",
+        ),
+      );
+    }
+
+    main.appendChild(fragment);
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-heading`,
+        },
+        "Network",
+      ),
+    );
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-text`,
+        },
+        `${entries.length} resource entries`,
+      ),
     );
   }
 
   /*
-   * ============================================================
-   * SCRIPT INJECTOR
-   * ============================================================
+   * ------------------------------------------------------------
+   * APPLICATION
+   * ------------------------------------------------------------
    */
 
-  function addScript(script) {
+  async function showApplication() {
+    currentTab = "Application";
+
+    clear(main);
+    clear(sidebar);
+
+    const pre = el(
+      "pre",
+      {
+        className: `${NS}info`,
+      },
+    );
+
+    pre.textContent = [
+      "IndexedDB",
+      "",
+      `Database: ${DB_NAME}`,
+      `Store: ${DB_STORE}`,
+      "",
+      "Persistent DevTools settings are stored locally.",
+      "",
+      "Saved scripts:",
+      ...state.scripts.map(
+        script =>
+          `• ${script.type}: ${script.value}`,
+      ),
+    ].join("\n");
+
+    main.appendChild(pre);
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-heading`,
+        },
+        "Application",
+      ),
+    );
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-text`,
+        },
+        "Local persistent settings and automatic scripts.",
+      ),
+    );
+  }
+
+  /*
+   * ------------------------------------------------------------
+   * SCRIPT INJECTOR
+   * ------------------------------------------------------------
+   */
+
+  function addScript(value) {
+    const source = value.trim();
+
+    if (!source) {
+      return;
+    }
+
     if (
-      script.startsWith(
-        "http://",
-      ) ||
-      script.startsWith(
-        "https://",
-      )
+      /^https?:\/\//i.test(source)
     ) {
-      const element =
+      const script =
         document.createElement(
           "script",
         );
 
-      element.src = script;
-
-      element.async = false;
+      script.src = source;
+      script.async = false;
 
       document.head.appendChild(
-        element,
+        script,
       );
 
       state.scripts.push({
         type: "url",
-        value: script,
+        value: source,
       });
 
       return;
     }
 
-    /*
-     * User-entered inline JS.
-     *
-     * This is a user-authorized feature of
-     * this local DevTools layer.
-     */
-
     try {
-      (0, eval)(script);
+      (0, eval)(source);
 
       state.scripts.push({
         type: "code",
-        value: script,
+        value: source,
       });
     } catch (error) {
       console.error(
-        "n3xn script error:",
+        "n3xn DevTools script:",
         error,
       );
     }
   }
 
   /*
-   * ============================================================
-   * CLOAK WINDOW
-   * ============================================================
+   * ------------------------------------------------------------
+   * SETTINGS
+   * ------------------------------------------------------------
+   */
+
+  function showSettings() {
+    currentTab = "Settings";
+
+    clear(main);
+    clear(sidebar);
+
+    const container = el(
+      "div",
+      {
+        className: `${NS}settings`,
+      },
+    );
+
+    const titleLabel = el(
+      "label",
+      {
+        className: `${NS}label`,
+      },
+      "Title override",
+    );
+
+    const title = el(
+      "input",
+      {
+        className: `${NS}input`,
+        value:
+          state.titleOverride || "",
+        placeholder:
+          "Custom document title",
+      },
+    );
+
+    const faviconLabel = el(
+      "label",
+      {
+        className: `${NS}label`,
+      },
+      "Favicon URL",
+    );
+
+    const favicon = el(
+      "input",
+      {
+        className: `${NS}input`,
+        value:
+          state.faviconOverride || "",
+        placeholder:
+          "https://example.com/favicon.ico",
+      },
+    );
+
+    const scriptLabel = el(
+      "label",
+      {
+        className: `${NS}label`,
+      },
+      "Automatic script URL or JavaScript",
+    );
+
+    const script = el(
+      "textarea",
+      {
+        className: `${NS}textarea`,
+        placeholder:
+          "https://example.com/script.js\n\nor\n\nconsole.log('hello')",
+      },
+    );
+
+    const save = el(
+      "button",
+      {
+        className: `${NS}action`,
+      },
+      "Save",
+    );
+
+    save.onclick = async () => {
+      state.titleOverride =
+        title.value.trim() ||
+        null;
+
+      state.faviconOverride =
+        favicon.value.trim() ||
+        null;
+
+      if (script.value.trim()) {
+        addScript(script.value);
+        script.value = "";
+      }
+
+      applyIdentity();
+
+      await saveState();
+
+      save.textContent = "Saved";
+
+      setTimeout(() => {
+        save.textContent = "Save";
+      }, 1000);
+    };
+
+    const enabledLabel = el(
+      "label",
+      {
+        className: `${NS}toggle`,
+      },
+    );
+
+    const enabled = el(
+      "input",
+      {
+        type: "checkbox",
+      },
+    );
+
+    enabled.checked =
+      state.enabled;
+
+    enabled.addEventListener(
+      "change",
+      async () => {
+        state.enabled =
+          enabled.checked;
+
+        await saveState();
+
+        root.style.display =
+          state.enabled
+            ? ""
+            : "none";
+
+        if (!state.enabled) {
+          closePanel();
+        }
+      },
+    );
+
+    enabledLabel.append(
+      enabled,
+      document.createTextNode(
+        " Enable n3xn DevTools",
+      ),
+    );
+
+    container.append(
+      titleLabel,
+      title,
+      faviconLabel,
+      favicon,
+      scriptLabel,
+      script,
+      save,
+      enabledLabel,
+    );
+
+    main.appendChild(container);
+
+    sidebar.appendChild(
+      el(
+        "div",
+        {
+          className: `${NS}side-heading`,
+        },
+        "Settings",
+      ),
+    );
+  }
+
+  /*
+   * ------------------------------------------------------------
+   * IDENTITY
+   * ------------------------------------------------------------
+   */
+
+  function applyIdentity() {
+    if (
+      state.titleOverride !== null
+    ) {
+      document.title =
+        state.titleOverride;
+    }
+
+    if (
+      state.faviconOverride !== null
+    ) {
+      let icon =
+        document.querySelector(
+          'link[rel~="icon"]',
+        );
+
+      if (!icon) {
+        icon =
+          document.createElement(
+            "link",
+          );
+
+        icon.rel = "icon";
+
+        document.head.appendChild(
+          icon,
+        );
+      }
+
+      icon.href =
+        state.faviconOverride;
+    }
+  }
+
+  /*
+   * ------------------------------------------------------------
+   * ABOUT:BLANK CLOAK
+   * ------------------------------------------------------------
    */
 
   function openCloak() {
@@ -711,27 +1009,23 @@
 
     if (!popup) {
       window.alert(
-        "Popup blocked by the browser.",
+        "The browser blocked the popup.",
       );
 
       return;
     }
 
     const title =
-      state.cloakTitle ??
-      state.titleOverride ??
+      state.cloakTitle ||
+      state.titleOverride ||
       document.title;
 
     const favicon =
-      state.cloakFavicon ??
-      state.faviconOverride ??
+      state.cloakFavicon ||
+      state.faviconOverride ||
       "";
 
-    const currentURL =
-      location.href;
-
-    const html =
-      `<!doctype html>
+    const html = `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -744,7 +1038,7 @@ ${
 </head>
 <body style="margin:0;overflow:hidden;background:#000">
 <iframe
-  src="${escapeHTML(currentURL)}"
+  src="${escapeHTML(location.href)}"
   style="position:fixed;inset:0;width:100%;height:100%;border:0"
   allow="
     accelerometer;
@@ -772,291 +1066,18 @@ ${
 </html>`;
 
     popup.document.open();
-
-    popup.document.write(
-      html,
-    );
-
+    popup.document.write(html);
     popup.document.close();
-
-    /*
-     * Keep the requested xd:// representation as
-     * a local/history identifier only.
-     *
-     * Browsers do not allow a normal webpage to
-     * turn itself into an arbitrary protocol handler.
-     */
-
-    try {
-      history.replaceState(
-        null,
-        "",
-        `xd://${location.host}${location.pathname}`,
-      );
-    } catch {}
   }
 
   /*
-   * ============================================================
-   * SETTINGS
-   * ============================================================
+   * ------------------------------------------------------------
+   * TAB ROUTER
+   * ------------------------------------------------------------
    */
 
-  function showSettings() {
-    mainArea.innerHTML = "";
-
-    sideArea.innerHTML = "";
-
-    const titleLabel =
-      create(
-        "label",
-        {},
-        "Page title",
-      );
-
-    const title =
-      create(
-        "input",
-        {
-          className:
-            "n3xn-devtools-field",
-          value:
-            state.titleOverride ||
-            "",
-          placeholder:
-            "Custom title",
-        },
-      );
-
-    const faviconLabel =
-      create(
-        "label",
-        {},
-        "Favicon URL",
-      );
-
-    const favicon =
-      create(
-        "input",
-        {
-          className:
-            "n3xn-devtools-field",
-          value:
-            state.faviconOverride ||
-            "",
-          placeholder:
-            "https://example.com/icon.png",
-        },
-      );
-
-    const scriptLabel =
-      create(
-        "label",
-        {},
-        "Automatic script URL or JavaScript",
-      );
-
-    const script =
-      create(
-        "textarea",
-        {
-          className:
-            "n3xn-devtools-field",
-          placeholder:
-            "https://example.com/script.js\nor\nconsole.log('hello')",
-          style:
-            "min-height:100px",
-        },
-      );
-
-    const save =
-      create(
-        "button",
-        {
-          className:
-            "n3xn-devtools-action",
-        },
-        "Save",
-      );
-
-    save.onclick =
-      async () => {
-        state.titleOverride =
-          title.value || null;
-
-        state.faviconOverride =
-          favicon.value || null;
-
-        applyIdentity();
-
-        if (
-          script.value.trim()
-        ) {
-          addScript(
-            script.value.trim(),
-          );
-
-          script.value = "";
-        }
-
-        await saveState();
-      };
-
-    const cloakTitleLabel =
-      create(
-        "label",
-        {},
-        "Cloak title",
-      );
-
-    const cloakTitle =
-      create(
-        "input",
-        {
-          className:
-            "n3xn-devtools-field",
-          value:
-            state.cloakTitle || "",
-        },
-      );
-
-    const cloakFaviconLabel =
-      create(
-        "label",
-        {},
-        "Cloak favicon",
-      );
-
-    const cloakFavicon =
-      create(
-        "input",
-        {
-          className:
-            "n3xn-devtools-field",
-          value:
-            state.cloakFavicon || "",
-        },
-      );
-
-    const cloak =
-      create(
-        "button",
-        {
-          className:
-            "n3xn-devtools-action",
-        },
-        "Open in about:blank",
-      );
-
-    cloak.onclick =
-      async () => {
-        state.cloakTitle =
-          cloakTitle.value ||
-          null;
-
-        state.cloakFavicon =
-          cloakFavicon.value ||
-          null;
-
-        await saveState();
-
-        openCloak();
-      };
-
-    const enabled =
-      create(
-        "input",
-        {
-          type: "checkbox",
-        },
-      );
-
-    enabled.checked =
-      state.enabled;
-
-    enabled.onchange =
-      async () => {
-        state.enabled =
-          enabled.checked;
-
-        await saveState();
-
-        root.style.display =
-          state.enabled
-            ? ""
-            : "none";
-
-        if (!state.enabled) {
-          closePanel();
-        }
-      };
-
-    sideArea.append(
-      titleLabel,
-      title,
-      faviconLabel,
-      favicon,
-      scriptLabel,
-      script,
-      save,
-
-      create("hr"),
-
-      cloakTitleLabel,
-      cloakTitle,
-      cloakFaviconLabel,
-      cloakFavicon,
-      cloak,
-
-      create("hr"),
-
-      create(
-        "label",
-        {},
-        "Enable n3xn DevTools ",
-      ),
-      enabled,
-    );
-
-    mainArea.appendChild(
-      create(
-        "pre",
-        {
-          className:
-            "n3xn-devtools-pre",
-        },
-        [
-          "n3xn DevTools settings",
-          "",
-          "Settings are stored in IndexedDB.",
-          "",
-          `Namespace: ${NS}`,
-          `Database: ${DB_NAME}`,
-        ].join("\n"),
-      ),
-    );
-  }
-
-  /*
-   * ============================================================
-   * TABS
-   * ============================================================
-   */
-
-  function switchTab(name) {
-    tabs
-      .querySelectorAll(
-        "button",
-      )
-      .forEach(button => {
-        button.classList.toggle(
-          "n3xn-active",
-          button.dataset.tab ===
-            name,
-        );
-      });
-
-    switch (name) {
+  function activateTab(tab) {
+    switch (tab) {
       case "Elements":
         showElements();
         break;
@@ -1080,147 +1101,247 @@ ${
       case "Settings":
         showSettings();
         break;
+
+      default:
+        showElements();
     }
   }
 
   /*
-   * ============================================================
+   * ------------------------------------------------------------
+   * PANEL
+   * ------------------------------------------------------------
+   */
+
+  function openPanel() {
+    panel.classList.add(
+      `${NS}open`,
+    );
+
+    launcher.classList.add(
+      `${NS}hidden`,
+    );
+
+    activateTab(currentTab);
+  }
+
+  function closePanel() {
+    panel.classList.remove(
+      `${NS}open`,
+    );
+
+    launcher.classList.remove(
+      `${NS}hidden`,
+    );
+
+    if (editor) {
+      try {
+        editor.dispose();
+      } catch {}
+
+      editor = null;
+      editorReady = false;
+    }
+  }
+
+  /*
+   * ------------------------------------------------------------
+   * DRAGGING
+   * ------------------------------------------------------------
+   */
+
+  function makeDraggable(node) {
+    let dragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    node.addEventListener(
+      "pointerdown",
+      event => {
+        if (event.button !== 0) {
+          return;
+        }
+
+        dragging = true;
+
+        const rect =
+          node.getBoundingClientRect();
+
+        offsetX =
+          event.clientX -
+          rect.left;
+
+        offsetY =
+          event.clientY -
+          rect.top;
+
+        node.setPointerCapture(
+          event.pointerId,
+        );
+
+        node.classList.add(
+          `${NS}dragging`,
+        );
+      },
+    );
+
+    node.addEventListener(
+      "pointermove",
+      event => {
+        if (!dragging) {
+          return;
+        }
+
+        const width =
+          node.offsetWidth;
+
+        const height =
+          node.offsetHeight;
+
+        const x = Math.max(
+          4,
+          Math.min(
+            window.innerWidth -
+              width -
+              4,
+            event.clientX -
+              offsetX,
+          ),
+        );
+
+        const y = Math.max(
+          4,
+          Math.min(
+            window.innerHeight -
+              height -
+              4,
+            event.clientY -
+              offsetY,
+          ),
+        );
+
+        node.style.left = `${x}px`;
+        node.style.top = `${y}px`;
+        node.style.right = "auto";
+        node.style.bottom = "auto";
+      },
+    );
+
+    node.addEventListener(
+      "pointerup",
+      event => {
+        dragging = false;
+
+        node.classList.remove(
+          `${NS}dragging`,
+        );
+
+        try {
+          node.releasePointerCapture(
+            event.pointerId,
+          );
+        } catch {}
+      },
+    );
+  }
+
+  /*
+   * ------------------------------------------------------------
    * BUILD UI
-   * ============================================================
+   * ------------------------------------------------------------
    */
 
   function build() {
     if (
       document.getElementById(
-        STYLE_ID,
+        `${NS}root`,
       )
     ) {
       return;
     }
 
-    const style =
-      create("style", {
-        id: STYLE_ID,
-      });
+    loadCSS();
 
-    /*
-     * Load the stylesheet relative to
-     * this page.
-     */
-
-    const link =
-      document.createElement(
-        "link",
-      );
-
-    link.rel = "stylesheet";
-
-    link.href =
-      "https://raw.githubusercontent.com/kbsigmaboy67AtSchool/git/main/public/devtools.css";
-
-    document.head.appendChild(
-      link,
+    root = el(
+      "div",
+      {
+        id: `${NS}root`,
+        className: `${NS}root`,
+      },
     );
-
-    /*
-     * Root
-     */
-
-    root =
-      create(
-        "div",
-        {
-          className:
-            "n3xn-devtools-root",
-        },
-      );
 
     /*
      * Launcher
      */
 
-    launcher =
-      create(
-        "button",
-        {
-          className:
-            "n3xn-devtools-launcher",
-          title:
-            "n3xn DevTools",
-        },
-        "⚙",
-      );
-
-    root.appendChild(
-      launcher,
+    launcher = el(
+      "button",
+      {
+        className: `${NS}launcher`,
+        title: "Open n3xn DevTools",
+        type: "button",
+      },
+      "⚙",
     );
 
     /*
-     * Window
+     * Panel
      */
 
-    windowPanel =
-      create(
-        "section",
-        {
-          className:
-            "n3xn-devtools-window",
-        },
-      );
+    panel = el(
+      "section",
+      {
+        className: `${NS}panel`,
+      },
+    );
 
-    /*
-     * Title bar
-     */
+    const titlebar = el(
+      "div",
+      {
+        className: `${NS}titlebar`,
+      },
+    );
 
-    const titlebar =
-      create(
-        "div",
-        {
-          className:
-            "n3xn-devtools-titlebar",
-        },
-      );
+    const title = el(
+      "span",
+      {
+        className: `${NS}title`,
+      },
+      "n3xn DevTools",
+    );
 
-    const title =
-      create(
-        "span",
-        {
-          className:
-            "n3xn-devtools-title",
-        },
-        "n3xn DevTools",
-      );
+    const minimize = el(
+      "button",
+      {
+        className: `${NS}title-button`,
+        type: "button",
+        title: "Hide DevTools",
+      },
+      "—",
+    );
 
-    const close =
-      create(
-        "button",
-        {
-          className:
-            "n3xn-devtools-button",
-        },
-        "×",
-      );
-
-    close.onclick =
-      closePanel;
+    const close = el(
+      "button",
+      {
+        className: `${NS}title-button`,
+        type: "button",
+        title: "Close DevTools",
+      },
+      "×",
+    );
 
     titlebar.append(
       title,
+      minimize,
       close,
     );
 
-    /*
-     * Tabs
-     */
-
-    tabs =
-      create(
-        "nav",
-        {
-          className:
-            "n3xn-devtools-tabs",
-        },
-      );
+    const tabbar = el(
+      "div",
+      {
+        className: `${NS}tabs`,
+      },
+    );
 
     const tabNames = [
       "Elements",
@@ -1231,186 +1352,168 @@ ${
       "Settings",
     ];
 
-    for (
-      const name
-      of tabNames
-    ) {
-      const button =
-        create(
-          "button",
-          {
-            className:
-              "n3xn-devtools-tab",
-          },
-          name,
-        );
+    for (const tabName of tabNames) {
+      const button = el(
+        "button",
+        {
+          className: `${NS}tab`,
+          type: "button",
+        },
+        tabName,
+      );
 
       button.dataset.tab =
-        name;
+        tabName;
 
-      button.onclick =
-        () =>
-          switchTab(name);
+      button.onclick = () => {
+        currentTab =
+          tabName;
 
-      tabs.appendChild(
+        for (
+          const item of
+            tabbar.querySelectorAll(
+              `.${NS}tab`,
+            )
+        ) {
+          item.classList.toggle(
+            `${NS}active`,
+            item.dataset.tab ===
+              tabName,
+          );
+        }
+
+        activateTab(tabName);
+      };
+
+      tabbar.appendChild(
         button,
       );
     }
 
-    /*
-     * Content
-     */
-
-    const content =
-      create(
-        "div",
-        {
-          className:
-            "n3xn-devtools-content",
-        },
-      );
-
-    mainArea =
-      create(
-        "main",
-        {
-          className:
-            "n3xn-devtools-main",
-        },
-      );
-
-    sideArea =
-      create(
-        "aside",
-        {
-          className:
-            "n3xn-devtools-sidebar",
-        },
-      );
-
-    content.append(
-      mainArea,
-      sideArea,
+    const content = el(
+      "div",
+      {
+        className: `${NS}content`,
+      },
     );
 
-    windowPanel.append(
+    main = el(
+      "div",
+      {
+        className: `${NS}main`,
+      },
+    );
+
+    sidebar = el(
+      "aside",
+      {
+        className: `${NS}sidebar`,
+      },
+    );
+
+    content.append(
+      main,
+      sidebar,
+    );
+
+    panel.append(
       titlebar,
-      tabs,
+      tabbar,
       content,
     );
 
-    document.documentElement.append(
+    root.append(
+      launcher,
+      panel,
+    );
+
+    document.documentElement.appendChild(
       root,
-      windowPanel,
     );
 
     /*
-     * Launcher
+     * Events
      */
 
-    launcher.onclick =
-      openPanel;
-
-    /*
-     * Dragging
-     */
-
-    let dragging = false;
-
-    let offsetX = 0;
-    let offsetY = 0;
-
     launcher.addEventListener(
-      "pointerdown",
-      event => {
-        dragging = true;
-
-        const rect =
-          root.getBoundingClientRect();
-
-        offsetX =
-          event.clientX -
-          rect.left;
-
-        offsetY =
-          event.clientY -
-          rect.top;
-
-        launcher.setPointerCapture(
-          event.pointerId,
-        );
-      },
-    );
-
-    launcher.addEventListener(
-      "pointermove",
-      event => {
-        if (!dragging) return;
-
-        root.style.left =
-          `${Math.max(
-            0,
-            Math.min(
-              window.innerWidth -
-                44,
-              event.clientX -
-                offsetX,
-            ),
-          )}px`;
-
-        root.style.top =
-          `${Math.max(
-            0,
-            Math.min(
-              window.innerHeight -
-                44,
-              event.clientY -
-                offsetY,
-            ),
-          )}px`;
-
-        root.style.right =
-          "auto";
-
-        root.style.bottom =
-          "auto";
-      },
-    );
-
-    launcher.addEventListener(
-      "pointerup",
+      "click",
       () => {
-        dragging = false;
+        if (
+          launcher.classList.contains(
+            `${NS}dragging`,
+          )
+        ) {
+          return;
+        }
+
+        openPanel();
       },
     );
 
+    close.addEventListener(
+      "click",
+      closePanel,
+    );
+
+    minimize.addEventListener(
+      "click",
+      closePanel,
+    );
+
+    makeDraggable(launcher);
+
     /*
-     * Start with Elements.
+     * First tab
      */
 
-    switchTab(
-      "Elements",
-    );
+    for (
+      const item of
+        tabbar.querySelectorAll(
+          `.${NS}tab`,
+        )
+    ) {
+      item.classList.toggle(
+        `${NS}active`,
+        item.dataset.tab ===
+          "Elements",
+      );
+    }
+
+    if (!state.enabled) {
+      root.style.display = "none";
+    }
   }
 
   /*
-   * ============================================================
-   * INIT
-   * ============================================================
+   * ------------------------------------------------------------
+   * START
+   * ------------------------------------------------------------
    */
 
-  async function init() {
+  async function start() {
     await loadState();
-
-    if (!state.enabled) {
-      return;
-    }
 
     applyIdentity();
 
-    build();
+    /*
+     * Wait until the document has a head/body.
+     */
+
+    if (
+      document.readyState ===
+      "loading"
+    ) {
+      document.addEventListener(
+        "DOMContentLoaded",
+        build,
+        {
+          once: true,
+        },
+      );
+    } else {
+      build();
+    }
   }
 
-  init();
+  start();
 })();
-

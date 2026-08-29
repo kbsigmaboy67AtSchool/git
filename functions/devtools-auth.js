@@ -1,4 +1,4 @@
-```js
+
 function unauthorized() {
   return new Response(
     JSON.stringify({
@@ -93,4 +93,3 @@ export async function onRequest({ request, env }) {
     },
   );
 }
-```

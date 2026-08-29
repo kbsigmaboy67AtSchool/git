@@ -7,11 +7,23 @@
    * + reliable layout for Monaco
    */
 
-  const UUID = crypto.randomUUID().replaceAll("-", "");
+  const UUID = (() => {
+    try {
+      if (crypto && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID().replaceAll("-", "");
+      }
+    } catch {}
+    return (
+      "n3xn" +
+      Date.now().toString(36) +
+      Math.random().toString(36).slice(2, 10)
+    );
+  })();
   const NS = `__n3xn_${UUID}_`;
 
-  const DB_NAME = `${NS}db`;
-  const DB_STORE = `${NS}state`;
+  // MUST be stable across reloads or nothing persists
+  const DB_NAME = "n3xn_devtools_db";
+  const DB_STORE = "state";
 
   // Prefer same-origin proxy (correct MIME). Fall back to jsDelivr.
   // NEVER use raw.githubusercontent.com — it is text/plain + nosniff and will not run/load as assets.
@@ -21,7 +33,7 @@
   const MONACO_LOADER =
     "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js";
 
-  const DEFAULT_HEIGHT = Math.round(window.innerHeight * 0.4);
+  const DEFAULT_HEIGHT = Math.round((typeof window !== "undefined" && window.innerHeight ? window.innerHeight : 800) * 0.4);
 
   const state = {
     enabled: true,
@@ -97,16 +109,43 @@
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
-      if (value) Object.assign(state, value);
-    } catch {}
+      if (value && typeof value === "object") {
+        const savedFlags = value.persistFlags;
+        Object.assign(state, value);
+        // merge flags so new keys default to true
+        state.persistFlags = Object.assign({
+          titleOverride: true,
+          faviconOverride: true,
+          scripts: true,
+          htmlPatches: true,
+          jsPatches: true,
+          headerRules: true,
+          attrRules: true,
+          devAuthenticated: true,
+        }, savedFlags || {});
+        state.htmlPatches = Array.isArray(state.htmlPatches) ? state.htmlPatches : [];
+        state.jsPatches = Array.isArray(state.jsPatches) ? state.jsPatches : [];
+        state.headerRules = Array.isArray(state.headerRules) ? state.headerRules : [];
+        state.attrRules = Array.isArray(state.attrRules) ? state.attrRules : [];
+        state.scripts = Array.isArray(state.scripts) ? state.scripts : [];
+      }
+    } catch (err) {
+      console.warn("n3xn DevTools loadState failed", err);
+    }
   }
 
   async function saveState() {
     try {
       const db = await openDB();
-      const tx = db.transaction(DB_STORE, "readwrite");
       const flags = state.persistFlags || {};
-      const toSave = structuredClone(state);
+      let toSave;
+      try {
+        toSave = typeof structuredClone === "function"
+          ? structuredClone(state)
+          : JSON.parse(JSON.stringify(state));
+      } catch {
+        toSave = JSON.parse(JSON.stringify(state));
+      }
       // Drop fields the user chose not to persist
       if (flags.titleOverride === false) toSave.titleOverride = null;
       if (flags.faviconOverride === false) toSave.faviconOverride = null;
@@ -116,8 +155,34 @@
       if (flags.headerRules === false) toSave.headerRules = [];
       if (flags.attrRules === false) toSave.attrRules = [];
       if (flags.devAuthenticated === false) toSave.devAuthenticated = false;
-      tx.objectStore(DB_STORE).put(toSave, "state");
-    } catch {}
+
+      // Always keep arrays defined
+      toSave.htmlPatches = toSave.htmlPatches || [];
+      toSave.jsPatches = toSave.jsPatches || [];
+      toSave.headerRules = toSave.headerRules || [];
+      toSave.attrRules = toSave.attrRules || [];
+      toSave.scripts = toSave.scripts || [];
+      toSave.persistFlags = Object.assign({
+        titleOverride: true,
+        faviconOverride: true,
+        scripts: true,
+        htmlPatches: true,
+        jsPatches: true,
+        headerRules: true,
+        attrRules: true,
+        devAuthenticated: true,
+      }, toSave.persistFlags || {});
+
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, "readwrite");
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error("aborted"));
+        tx.objectStore(DB_STORE).put(toSave, "state");
+      });
+    } catch (err) {
+      console.warn("n3xn DevTools saveState failed", err);
+    }
   }
 
   /* ── CSS ── */
@@ -609,11 +674,11 @@
       try {
         if (typeof args[0] === "string") {
           const init = Object.assign({}, args[1] || {});
-          init.headers = applyRequestHeaderRules(init.headers, url);
+          init.headers = (typeof applyRequestHeaderRules === "function" ? applyRequestHeaderRules(init.headers, url) : init.headers);
           args[1] = init;
         } else if (args[0] instanceof Request) {
           const req = args[0];
-          const h = applyRequestHeaderRules(req.headers, req.url);
+          const h = (typeof applyRequestHeaderRules === "function" ? applyRequestHeaderRules(req.headers, req.url) : req.headers);
           args[0] = new Request(req, { headers: h });
         }
       } catch {}
@@ -2271,27 +2336,62 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
   /* ── Start ── */
 
   async function start() {
-    await loadState();
-    applyIdentity();
-    for (const s of state.scripts || []) {
-      try {
-        if (s.type === "url") addScript(s.value);
-        else if (s.type === "code") (0, eval)(s.value);
-      } catch {}
+    try {
+      await loadState();
+    } catch (err) {
+      console.warn("n3xn DevTools loadState", err);
     }
 
-    // Re-apply persisted patches
-    try {
-      applyAllPatches();
-      startPatchObserver();
-    } catch {}
+    // Always build UI first so the launcher appears even if patches fail
+    const go = () => {
+      try {
+        build();
+      } catch (err) {
+        console.error("n3xn DevTools build failed", err);
+        // last-resort visible button
+        try {
+          const b = document.createElement("button");
+          b.textContent = "⚙";
+          b.title = "n3xn DevTools (recovery)";
+          b.style.cssText =
+            "position:fixed;right:16px;bottom:16px;z-index:2147483647;width:40px;height:40px;border-radius:50%;border:1px solid #5f6368;background:#292a2d;color:#8ab4f8;cursor:pointer";
+          b.onclick = () => alert("DevTools failed to build. Check console for errors.");
+          document.documentElement.appendChild(b);
+        } catch {}
+        return;
+      }
+
+      try {
+        applyIdentity();
+      } catch {}
+
+      try {
+        for (const item of state.scripts || []) {
+          try {
+            if (item.type === "url") addScript(item.value);
+            else if (item.type === "code") (0, eval)(item.code || item.value);
+          } catch {}
+        }
+      } catch {}
+
+      try {
+        applyAllPatches();
+        startPatchObserver();
+      } catch (err) {
+        console.warn("n3xn DevTools patches", err);
+      }
+    };
 
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", build, { once: true });
+      document.addEventListener("DOMContentLoaded", go, { once: true });
     } else {
-      build();
+      go();
     }
   }
 
-  start();
+  try {
+    start();
+  } catch (err) {
+    console.error("n3xn DevTools start", err);
+  }
 })();

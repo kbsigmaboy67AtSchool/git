@@ -2,7 +2,7 @@ const SESSION_COOKIE = "n3xn_session";
 const SESSION_TTL = 60 * 60 * 24 * 30;
 
 const DEVTOOLS_SCRIPT =
-  "https://kbsigmaboy67atschool.github.io/git/devtools.js";
+  "https://kbsigmaboy67atschool.github.io/git/public/devtools.js";
 
 function loginPage(error = "") {
   return new Response(

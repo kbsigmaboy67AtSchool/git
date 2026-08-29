@@ -1,4 +1,4 @@
-```js
+
 const SESSION_COOKIE = "n3xn_session";
 const SESSION_TTL = 60 * 60 * 24 * 30;
 
@@ -300,4 +300,3 @@ export async function onRequest(context) {
 
   return response;
 }
-```

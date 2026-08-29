@@ -33,6 +33,21 @@
     devAuthenticated: false,
     dockHeight: null,
     open: false,
+    // Persist / Patches (survives reloads via IndexedDB)
+    htmlPatches: [],      // { id, selector, mode, attr?, value, enabled }
+    jsPatches: [],        // { id, name, code, enabled, runAt }
+    headerRules: [],      // { id, match, phase, header, value, enabled } phase: request|response
+    attrRules: [],        // { id, selector, attr, value, enabled }
+    persistFlags: {
+      titleOverride: true,
+      faviconOverride: true,
+      scripts: true,
+      htmlPatches: true,
+      jsPatches: true,
+      headerRules: true,
+      attrRules: true,
+      devAuthenticated: true,
+    },
   };
 
   let root = null;
@@ -90,7 +105,18 @@
     try {
       const db = await openDB();
       const tx = db.transaction(DB_STORE, "readwrite");
-      tx.objectStore(DB_STORE).put(structuredClone(state), "state");
+      const flags = state.persistFlags || {};
+      const toSave = structuredClone(state);
+      // Drop fields the user chose not to persist
+      if (flags.titleOverride === false) toSave.titleOverride = null;
+      if (flags.faviconOverride === false) toSave.faviconOverride = null;
+      if (flags.scripts === false) toSave.scripts = [];
+      if (flags.htmlPatches === false) toSave.htmlPatches = [];
+      if (flags.jsPatches === false) toSave.jsPatches = [];
+      if (flags.headerRules === false) toSave.headerRules = [];
+      if (flags.attrRules === false) toSave.attrRules = [];
+      if (flags.devAuthenticated === false) toSave.devAuthenticated = false;
+      tx.objectStore(DB_STORE).put(toSave, "state");
     } catch {}
   }
 
@@ -579,6 +605,19 @@
         }
       } catch {}
 
+      // Experimental request header rewrite
+      try {
+        if (typeof args[0] === "string") {
+          const init = Object.assign({}, args[1] || {});
+          init.headers = applyRequestHeaderRules(init.headers, url);
+          args[1] = init;
+        } else if (args[0] instanceof Request) {
+          const req = args[0];
+          const h = applyRequestHeaderRules(req.headers, req.url);
+          args[0] = new Request(req, { headers: h });
+        }
+      } catch {}
+
       const entry = {
         id: crypto.randomUUID(),
         method: String(method).toUpperCase(),
@@ -776,6 +815,102 @@
         });
       }
     } catch {}
+  }
+
+
+
+  /* ── Persist / patches engine ── */
+
+  function uid() {
+    return crypto.randomUUID().slice(0, 8);
+  }
+
+  function applyAttrRules() {
+    for (const rule of state.attrRules || []) {
+      if (!rule.enabled) continue;
+      try {
+        document.querySelectorAll(rule.selector).forEach((node) => {
+          if (rule.value === null || rule.value === "") {
+            node.removeAttribute(rule.attr);
+          } else {
+            node.setAttribute(rule.attr, rule.value);
+          }
+        });
+      } catch (err) {
+        console.warn("n3xn attr rule", rule, err);
+      }
+    }
+  }
+
+  function applyHtmlPatches() {
+    for (const patch of state.htmlPatches || []) {
+      if (!patch.enabled) continue;
+      try {
+        const nodes = document.querySelectorAll(patch.selector);
+        nodes.forEach((node) => {
+          if (patch.mode === "attr" && patch.attr) {
+            node.setAttribute(patch.attr, patch.value ?? "");
+          } else if (patch.mode === "text") {
+            node.textContent = patch.value ?? "";
+          } else if (patch.mode === "html") {
+            node.innerHTML = patch.value ?? "";
+          } else if (patch.mode === "outer") {
+            node.outerHTML = patch.value ?? "";
+          } else if (patch.mode === "remove") {
+            node.remove();
+          }
+        });
+      } catch (err) {
+        console.warn("n3xn html patch", patch, err);
+      }
+    }
+  }
+
+  function applyJsPatches() {
+    for (const patch of state.jsPatches || []) {
+      if (!patch.enabled) continue;
+      try {
+        (0, eval)(patch.code);
+      } catch (err) {
+        console.warn("n3xn js patch", patch.name, err);
+      }
+    }
+  }
+
+  function applyAllPatches() {
+    applyAttrRules();
+    applyHtmlPatches();
+    applyJsPatches();
+  }
+
+  // Observe DOM for late nodes matching attr/html rules
+  let patchObserver = null;
+  function startPatchObserver() {
+    if (patchObserver) return;
+    try {
+      patchObserver = new MutationObserver(() => {
+        applyAttrRules();
+        applyHtmlPatches();
+      });
+      patchObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+    } catch {}
+  }
+
+  // Extend network intercept with header rules
+  function applyRequestHeaderRules(headers, url) {
+    const h = headers instanceof Headers ? headers : new Headers(headers || {});
+    for (const rule of state.headerRules || []) {
+      if (!rule.enabled || rule.phase !== "request") continue;
+      try {
+        if (rule.match && !String(url).includes(rule.match)) continue;
+        if (rule.value === "" || rule.value == null) h.delete(rule.header);
+        else h.set(rule.header, rule.value);
+      } catch {}
+    }
+    return h;
   }
 
 
@@ -1255,6 +1390,548 @@
   }
 
 
+
+  function showPersist() {
+    currentTab = "Persist";
+    clear(main);
+    clear(detail);
+    detail.style.display = "";
+
+    const toolbar = el("div", { className: `${NS}toolbar` });
+    const select = el("select", {
+      className: `${NS}select`,
+      style: { margin: "0", width: "auto", minWidth: "160px" },
+    });
+    for (const opt of [
+      "What saves",
+      "HTML patches",
+      "JS patches",
+      "Attribute rules",
+      "Header rules",
+      "IndexedDB",
+      "Extensions",
+    ]) {
+      select.appendChild(el("option", { value: opt }, opt));
+    }
+    const addBtn = el("button", { className: `${NS}action`, style: { margin: "0" } }, "Add");
+    const applyBtn = el("button", { className: `${NS}action`, style: { margin: "0" }, dataset: { primary: "1" } }, "Apply now");
+    toolbar.append(select, addBtn, applyBtn);
+    main.appendChild(toolbar);
+
+    const list = el("div", { className: `${NS}storage-list` });
+    main.appendChild(list);
+
+    applyBtn.onclick = () => {
+      applyAllPatches();
+      startPatchObserver();
+    };
+
+    function note(text) {
+      clear(detail);
+      detail.appendChild(el("div", { className: `${NS}side-heading` }, select.value));
+      detail.appendChild(el("div", { className: `${NS}side-text` }, text));
+    }
+
+    async function savePersist() {
+      await saveState();
+    }
+
+    function row3(a, b, c) {
+      const row = el("div", { className: `${NS}storage-row` });
+      row.append(
+        el("div", { className: `${NS}storage-key` }, a),
+        el("div", { className: `${NS}storage-val` }, b),
+        c || el("div", {}, ""),
+      );
+      return row;
+    }
+
+    function renderWhatSaves() {
+      clear(list);
+      note(
+        "Toggle which DevTools settings are written to IndexedDB. " +
+          "Turning something off keeps it for this session only. " +
+          "Changing flags does not need a password; clearing all saved data does.",
+      );
+      const flags = state.persistFlags || {};
+      const labels = {
+        titleOverride: "Title override",
+        faviconOverride: "Favicon override",
+        scripts: "Auto scripts (Settings)",
+        htmlPatches: "HTML patches",
+        jsPatches: "JS patches",
+        headerRules: "Header rules",
+        attrRules: "Attribute rules",
+        devAuthenticated: "Remember DevTools auth",
+      };
+      for (const [key, label] of Object.entries(labels)) {
+        const row = el("div", { className: `${NS}storage-row` });
+        const lab = el("label", { className: `${NS}toggle`, style: { margin: "0" } });
+        const cb = el("input", { type: "checkbox" });
+        cb.checked = flags[key] !== false;
+        cb.onchange = async () => {
+          state.persistFlags = state.persistFlags || {};
+          state.persistFlags[key] = cb.checked;
+          await savePersist();
+        };
+        lab.append(cb, document.createTextNode(" " + label));
+        row.append(lab, el("div", {}, ""), el("div", {}, ""));
+        list.appendChild(row);
+      }
+      const wipe = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Wipe all DevTools saved data");
+      wipe.onclick = async () => {
+        if (!(await authenticate())) return;
+        if (!confirm("Delete IndexedDB state for n3xn DevTools on this origin?")) return;
+        try {
+          const db = await openDB();
+          db.transaction(DB_STORE, "readwrite").objectStore(DB_STORE).delete("state");
+        } catch {}
+        state.htmlPatches = [];
+        state.jsPatches = [];
+        state.headerRules = [];
+        state.attrRules = [];
+        state.scripts = [];
+        state.devAuthenticated = false;
+        await savePersist();
+        render();
+      };
+      list.appendChild(wipe);
+    }
+
+    function renderHtmlPatches() {
+      clear(list);
+      note(
+        "HTML patches re-apply on load and via MutationObserver. " +
+          "Modes: attr | text | html | outer | remove. Add/edit/delete need the DevTools password.",
+      );
+      const head = row3("selector", "mode / value", "");
+      head.style.opacity = "0.6";
+      list.appendChild(head);
+      for (const patch of state.htmlPatches || []) {
+        const row = row3(
+          patch.selector,
+          `${patch.enabled === false ? "[off] " : ""}${patch.mode}${patch.attr ? "." + patch.attr : ""} → ${String(patch.value || "").slice(0, 40)}`,
+          "",
+        );
+        row.style.cursor = "pointer";
+        row.onclick = () => {
+          clear(detail);
+          detail.appendChild(el("div", { className: `${NS}side-heading` }, "HTML patch"));
+          const en = el("label", { className: `${NS}toggle` });
+          const cb = el("input", { type: "checkbox" });
+          cb.checked = patch.enabled !== false;
+          en.append(cb, document.createTextNode(" Enabled"));
+          const sel = el("input", { className: `${NS}input`, value: patch.selector });
+          const mode = el("select", { className: `${NS}select` });
+          for (const m of ["attr", "text", "html", "outer", "remove"]) {
+            const o = el("option", { value: m }, m);
+            if (patch.mode === m) o.selected = true;
+            mode.appendChild(o);
+          }
+          const attr = el("input", { className: `${NS}input`, value: patch.attr || "", placeholder: "attribute (for mode=attr)" });
+          const val = el("textarea", { className: `${NS}textarea` });
+          val.value = patch.value || "";
+          const save = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Save");
+          save.onclick = async () => {
+            if (!(await authenticate())) return;
+            patch.enabled = cb.checked;
+            patch.selector = sel.value.trim();
+            patch.mode = mode.value;
+            patch.attr = attr.value.trim() || null;
+            patch.value = val.value;
+            await savePersist();
+            applyHtmlPatches();
+            render();
+          };
+          const del = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Delete");
+          del.onclick = async () => {
+            if (!(await authenticate())) return;
+            state.htmlPatches = state.htmlPatches.filter((p) => p.id !== patch.id);
+            await savePersist();
+            render();
+          };
+          detail.append(
+            en,
+            el("div", { className: `${NS}label` }, "Selector"),
+            sel,
+            el("div", { className: `${NS}label` }, "Mode"),
+            mode,
+            el("div", { className: `${NS}label` }, "Attribute"),
+            attr,
+            el("div", { className: `${NS}label` }, "Value"),
+            val,
+            save,
+            del,
+          );
+        };
+        list.appendChild(row);
+      }
+      if (!(state.htmlPatches || []).length) {
+        list.appendChild(el("div", { className: `${NS}empty` }, "No HTML patches yet."));
+      }
+    }
+
+    function renderJsPatches() {
+      clear(list);
+      note(
+        "JS patches run once when DevTools starts (after load). " +
+          "They are stored in IndexedDB. Add/edit need the DevTools password. " +
+          "Python patching is not available in-page (browser has no Python runtime).",
+      );
+      for (const patch of state.jsPatches || []) {
+        const row = row3(
+          patch.name || patch.id,
+          `${patch.enabled === false ? "[off] " : ""}${String(patch.code || "").slice(0, 50)}`,
+          "",
+        );
+        row.style.cursor = "pointer";
+        row.onclick = () => {
+          clear(detail);
+          detail.appendChild(el("div", { className: `${NS}side-heading` }, "JS patch"));
+          const en = el("label", { className: `${NS}toggle` });
+          const cb = el("input", { type: "checkbox" });
+          cb.checked = patch.enabled !== false;
+          en.append(cb, document.createTextNode(" Enabled"));
+          const name = el("input", { className: `${NS}input`, value: patch.name || "" });
+          const code = el("textarea", { className: `${NS}textarea`, style: { minHeight: "120px" } });
+          code.value = patch.code || "";
+          const save = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Save");
+          save.onclick = async () => {
+            if (!(await authenticate())) return;
+            patch.enabled = cb.checked;
+            patch.name = name.value.trim() || patch.id;
+            patch.code = code.value;
+            await savePersist();
+            render();
+          };
+          const run = el("button", { className: `${NS}action` }, "Run once");
+          run.onclick = async () => {
+            if (!(await authenticate())) return;
+            try {
+              (0, eval)(code.value);
+            } catch (err) {
+              alert(String(err));
+            }
+          };
+          const del = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Delete");
+          del.onclick = async () => {
+            if (!(await authenticate())) return;
+            state.jsPatches = state.jsPatches.filter((p) => p.id !== patch.id);
+            await savePersist();
+            render();
+          };
+          detail.append(
+            en,
+            el("div", { className: `${NS}label` }, "Name"),
+            name,
+            el("div", { className: `${NS}label` }, "Code"),
+            code,
+            save,
+            run,
+            del,
+          );
+        };
+        list.appendChild(row);
+      }
+      if (!(state.jsPatches || []).length) {
+        list.appendChild(el("div", { className: `${NS}empty` }, "No JS patches yet."));
+      }
+    }
+
+    function renderAttrRules() {
+      clear(list);
+      note(
+        "Attribute rules force attributes on matching elements (and on new nodes). Password to add/edit.",
+      );
+      for (const rule of state.attrRules || []) {
+        const row = row3(
+          rule.selector,
+          `${rule.enabled === false ? "[off] " : ""}${rule.attr}="${String(rule.value || "").slice(0, 40)}"`,
+          "",
+        );
+        row.style.cursor = "pointer";
+        row.onclick = () => {
+          clear(detail);
+          const en = el("label", { className: `${NS}toggle` });
+          const cb = el("input", { type: "checkbox" });
+          cb.checked = rule.enabled !== false;
+          en.append(cb, document.createTextNode(" Enabled"));
+          const sel = el("input", { className: `${NS}input`, value: rule.selector });
+          const attr = el("input", { className: `${NS}input`, value: rule.attr });
+          const val = el("input", { className: `${NS}input`, value: rule.value || "" });
+          const save = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Save");
+          save.onclick = async () => {
+            if (!(await authenticate())) return;
+            rule.enabled = cb.checked;
+            rule.selector = sel.value.trim();
+            rule.attr = attr.value.trim();
+            rule.value = val.value;
+            await savePersist();
+            applyAttrRules();
+            render();
+          };
+          const del = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Delete");
+          del.onclick = async () => {
+            if (!(await authenticate())) return;
+            state.attrRules = state.attrRules.filter((r) => r.id !== rule.id);
+            await savePersist();
+            render();
+          };
+          detail.append(
+            el("div", { className: `${NS}side-heading` }, "Attribute rule"),
+            en,
+            el("div", { className: `${NS}label` }, "Selector"),
+            sel,
+            el("div", { className: `${NS}label` }, "Attribute"),
+            attr,
+            el("div", { className: `${NS}label` }, "Value (empty = remove)"),
+            val,
+            save,
+            del,
+          );
+        };
+        list.appendChild(row);
+      }
+      if (!(state.attrRules || []).length) {
+        list.appendChild(el("div", { className: `${NS}empty` }, "No attribute rules."));
+      }
+    }
+
+    function renderHeaderRules() {
+      clear(list);
+      note(
+        "EXPERIMENTAL: rewrites headers on page-initiated fetch/XHR only — not top-level navigations, not other tabs, not HttpOnly cookie headers. Password to add/edit.",
+      );
+      for (const rule of state.headerRules || []) {
+        const row = row3(
+          rule.match || "*",
+          `${rule.enabled === false ? "[off] " : ""}${rule.phase} ${rule.header}: ${String(rule.value || "").slice(0, 30)}`,
+          "",
+        );
+        row.style.cursor = "pointer";
+        row.onclick = () => {
+          clear(detail);
+          const en = el("label", { className: `${NS}toggle` });
+          const cb = el("input", { type: "checkbox" });
+          cb.checked = rule.enabled !== false;
+          en.append(cb, document.createTextNode(" Enabled"));
+          const match = el("input", { className: `${NS}input`, value: rule.match || "", placeholder: "URL substring match" });
+          const phase = el("select", { className: `${NS}select` });
+          for (const m of ["request"]) {
+            const o = el("option", { value: m }, m + (m === "request" ? "" : " (limited)"));
+            if (rule.phase === m) o.selected = true;
+            phase.appendChild(o);
+          }
+          const header = el("input", { className: `${NS}input`, value: rule.header || "" });
+          const val = el("input", { className: `${NS}input`, value: rule.value || "" });
+          const save = el("button", { className: `${NS}action`, dataset: { primary: "1" } }, "Save");
+          save.onclick = async () => {
+            if (!(await authenticate())) return;
+            rule.enabled = cb.checked;
+            rule.match = match.value.trim();
+            rule.phase = phase.value;
+            rule.header = header.value.trim();
+            rule.value = val.value;
+            await savePersist();
+            render();
+          };
+          const del = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Delete");
+          del.onclick = async () => {
+            if (!(await authenticate())) return;
+            state.headerRules = state.headerRules.filter((r) => r.id !== rule.id);
+            await savePersist();
+            render();
+          };
+          detail.append(
+            el("div", { className: `${NS}side-heading` }, "Header rule"),
+            en,
+            el("div", { className: `${NS}label` }, "URL contains"),
+            match,
+            el("div", { className: `${NS}label` }, "Phase"),
+            phase,
+            el("div", { className: `${NS}label` }, "Header name"),
+            header,
+            el("div", { className: `${NS}label` }, "Value (empty = delete header)"),
+            val,
+            save,
+            del,
+          );
+        };
+        list.appendChild(row);
+      }
+      if (!(state.headerRules || []).length) {
+        list.appendChild(el("div", { className: `${NS}empty` }, "No header rules."));
+      }
+    }
+
+    async function renderIndexedDB() {
+      clear(list);
+      note("Browse IndexedDB databases on this origin. Deleting data needs the DevTools password.");
+      try {
+        if (!indexedDB.databases) {
+          list.appendChild(
+            el("div", { className: `${NS}empty` }, "indexedDB.databases() not supported in this browser."),
+          );
+          return;
+        }
+        const dbs = await indexedDB.databases();
+        if (!dbs.length) {
+          list.appendChild(el("div", { className: `${NS}empty` }, "No IndexedDB databases."));
+          return;
+        }
+        for (const info of dbs) {
+          const row = row3(info.name || "(unnamed)", `v${info.version ?? "?"}`, "");
+          row.style.cursor = "pointer";
+          row.onclick = async () => {
+            clear(detail);
+            detail.appendChild(el("div", { className: `${NS}side-heading` }, info.name));
+            detail.appendChild(el("div", { className: `${NS}side-text` }, `version ${info.version}`));
+            try {
+              const db = await new Promise((resolve, reject) => {
+                const req = indexedDB.open(info.name);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+              });
+              const stores = [...db.objectStoreNames];
+              detail.appendChild(
+                el("div", { className: `${NS}side-text` }, "Stores: " + (stores.join(", ") || "(none)")),
+              );
+              for (const storeName of stores) {
+                const tx = db.transaction(storeName, "readonly");
+                const store = tx.objectStore(storeName);
+                const count = await new Promise((resolve) => {
+                  const c = store.count();
+                  c.onsuccess = () => resolve(c.result);
+                  c.onerror = () => resolve("?");
+                });
+                detail.appendChild(
+                  el("div", { className: `${NS}side-text` }, `• ${storeName}: ${count} records`),
+                );
+              }
+              const del = el("button", { className: `${NS}action`, dataset: { danger: "1" } }, "Delete database");
+              del.onclick = async () => {
+                if (!(await authenticate())) return;
+                if (!confirm(`Delete IndexedDB "${info.name}"?`)) return;
+                db.close();
+                await new Promise((resolve, reject) => {
+                  const r = indexedDB.deleteDatabase(info.name);
+                  r.onsuccess = () => resolve();
+                  r.onerror = () => reject(r.error);
+                });
+                render();
+              };
+              detail.appendChild(del);
+              db.close();
+            } catch (err) {
+              detail.appendChild(el("div", { className: `${NS}side-text` }, String(err)));
+            }
+          };
+          list.appendChild(row);
+        }
+      } catch (err) {
+        list.appendChild(el("div", { className: `${NS}empty` }, String(err)));
+      }
+    }
+
+    function renderExtensions() {
+      clear(list);
+      note(
+        "Browser extensions run in isolated worlds. A normal page (and this DevTools) cannot read or edit other extensions' storage, background pages, or code. " +
+          "Below is only what is visible on this page's window.",
+      );
+      const checks = [
+        ["chrome namespace", typeof chrome !== "undefined"],
+        ["chrome.runtime", typeof chrome !== "undefined" && !!(chrome && chrome.runtime)],
+        ["browser namespace (WebExt)", typeof browser !== "undefined"],
+        ["browser.runtime", typeof browser !== "undefined" && !!(browser && browser.runtime)],
+      ];
+      for (const [label, yes] of checks) {
+        list.appendChild(row3(label, yes ? "present" : "not present", ""));
+      }
+      // Heuristic: odd globals some extensions inject
+      const suspects = [];
+      try {
+        for (const name of Object.getOwnPropertyNames(window)) {
+          if (/^(chrome|browser)$/i.test(name)) continue;
+          if (/extension|webext|gm_|tamper|violent|greasemonkey|userscript/i.test(name)) {
+            suspects.push(name);
+          }
+        }
+      } catch {}
+      list.appendChild(row3("suspicious globals", suspects.length ? suspects.join(", ") : "(none detected)", ""));
+      list.appendChild(
+        el(
+          "div",
+          { className: `${NS}empty` },
+          "To inspect real extension data, use chrome://extensions and each extension's own DevTools page — not injectable from a web origin.",
+        ),
+      );
+    }
+
+    function render() {
+      const kind = select.value;
+      addBtn.style.display = ["HTML patches", "JS patches", "Attribute rules", "Header rules"].includes(kind)
+        ? ""
+        : "none";
+      if (kind === "What saves") renderWhatSaves();
+      else if (kind === "HTML patches") renderHtmlPatches();
+      else if (kind === "JS patches") renderJsPatches();
+      else if (kind === "Attribute rules") renderAttrRules();
+      else if (kind === "Header rules") renderHeaderRules();
+      else if (kind === "IndexedDB") renderIndexedDB();
+      else if (kind === "Extensions") renderExtensions();
+    }
+
+    addBtn.onclick = async () => {
+      if (!(await authenticate())) return;
+      const kind = select.value;
+      if (kind === "HTML patches") {
+        state.htmlPatches = state.htmlPatches || [];
+        state.htmlPatches.push({
+          id: uid(),
+          selector: "body",
+          mode: "attr",
+          attr: "data-n3xn",
+          value: "1",
+          enabled: true,
+        });
+      } else if (kind === "JS patches") {
+        state.jsPatches = state.jsPatches || [];
+        state.jsPatches.push({
+          id: uid(),
+          name: "new patch",
+          code: "// runs on load\\nconsole.log('n3xn js patch')",
+          enabled: true,
+        });
+      } else if (kind === "Attribute rules") {
+        state.attrRules = state.attrRules || [];
+        state.attrRules.push({
+          id: uid(),
+          selector: "a",
+          attr: "target",
+          value: "_blank",
+          enabled: true,
+        });
+      } else if (kind === "Header rules") {
+        state.headerRules = state.headerRules || [];
+        state.headerRules.push({
+          id: uid(),
+          match: "",
+          phase: "request",
+          header: "X-N3xn",
+          value: "1",
+          enabled: true,
+        });
+      }
+      await savePersist();
+      render();
+    };
+
+    select.onchange = render;
+    render();
+  }
+
+
   function showSettings() {
     currentTab = "Settings";
     clear(main);
@@ -1411,6 +2088,7 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
       case "Sources": showSources(); break;
       case "Network": showNetwork(); break;
       case "Application": showApplication(); break;
+      case "Persist": showPersist(); break;
       case "Settings": showSettings(); break;
       default: showElements();
     }
@@ -1532,7 +2210,7 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
     const titlebar = el("div", { className: `${NS}titlebar` });
 
     const tabbar = el("div", { className: `${NS}tabs` });
-    const tabNames = ["Elements", "Console", "Sources", "Network", "Application", "Settings"];
+    const tabNames = ["Elements", "Console", "Sources", "Network", "Application", "Persist", "Settings"];
     for (const tabName of tabNames) {
       const button = el("button", { className: `${NS}tab`, type: "button" }, tabName);
       button.dataset.tab = tabName;
@@ -1601,6 +2279,12 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
         else if (s.type === "code") (0, eval)(s.value);
       } catch {}
     }
+
+    // Re-apply persisted patches
+    try {
+      applyAllPatches();
+      startPatchObserver();
+    } catch {}
 
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", build, { once: true });

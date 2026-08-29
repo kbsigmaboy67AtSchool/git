@@ -10,8 +10,15 @@
 const SESSION_COOKIE = "n3xn_session";
 const SESSION_TTL = 60 * 60 * 24 * 30;
 
-// jsDelivr serves application/javascript — raw.githubusercontent does NOT
-const DEVTOOLS_SCRIPT =
+// Inject SAME-ORIGIN so we control MIME + avoid jsDelivr CDN lag.
+// The /devtools.js handler below proxies GitHub raw and sets application/javascript.
+const DEVTOOLS_SCRIPT = "/devtools.js";
+const DEVTOOLS_UPSTREAM_JS =
+  "https://raw.githubusercontent.com/kbsigmaboy67AtSchool/git/main/public/devtools.js";
+const DEVTOOLS_UPSTREAM_CSS =
+  "https://raw.githubusercontent.com/kbsigmaboy67AtSchool/git/main/public/devtools.css";
+// Optional CDN mirror (may lag after push)
+const DEVTOOLS_CDN_JS =
   "https://cdn.jsdelivr.net/gh/kbsigmaboy67AtSchool/git@main/public/devtools.js";
 
 function loginPage(error = "") {
@@ -191,34 +198,59 @@ export async function onRequest(context) {
     return context.next();
   }
 
-  // Same-origin script proxy (fallback if jsDelivr is blocked)
+  // Same-origin assets: proxy GitHub raw with correct MIME (raw is text/plain).
   if (url.pathname === "/devtools.js" || url.pathname === "/n3xn-devtools.js") {
-    const upstream = await fetch(DEVTOOLS_SCRIPT, {
-      cf: { cacheTtl: 300, cacheEverything: true },
-    });
-    const body = await upstream.text();
+    let body = "";
+    let ok = false;
+    for (const src of [DEVTOOLS_UPSTREAM_JS, DEVTOOLS_CDN_JS]) {
+      try {
+        const upstream = await fetch(src, {
+          cf: { cacheTtl: 60, cacheEverything: true },
+        });
+        if (upstream.ok) {
+          body = await upstream.text();
+          // sanity: must look like our IIFE
+          if (body.includes("__n3xn_") || body.includes("n3xn DevTools")) {
+            ok = true;
+            break;
+          }
+        }
+      } catch {}
+    }
+    if (!ok) {
+      return new Response("/* devtools.js upstream fetch failed */", {
+        status: 502,
+        headers: { "Content-Type": "application/javascript; charset=utf-8" },
+      });
+    }
     return new Response(body, {
       status: 200,
       headers: {
         "Content-Type": "application/javascript; charset=utf-8",
-        "Cache-Control": "public, max-age=300",
+        "Cache-Control": "public, max-age=60, must-revalidate",
         "Access-Control-Allow-Origin": "*",
       },
     });
   }
 
   if (url.pathname === "/devtools.css" || url.pathname === "/n3xn-devtools.css") {
-    const cssUrl =
-      "https://cdn.jsdelivr.net/gh/kbsigmaboy67AtSchool/git@main/public/devtools.css";
-    const upstream = await fetch(cssUrl, {
-      cf: { cacheTtl: 300, cacheEverything: true },
-    });
-    const body = await upstream.text();
+    let body = "";
+    try {
+      const upstream = await fetch(DEVTOOLS_UPSTREAM_CSS, {
+        cf: { cacheTtl: 60, cacheEverything: true },
+      });
+      body = await upstream.text();
+    } catch {
+      return new Response("/* css fetch failed */", {
+        status: 502,
+        headers: { "Content-Type": "text/css; charset=utf-8" },
+      });
+    }
     return new Response(body, {
       status: 200,
       headers: {
         "Content-Type": "text/css; charset=utf-8",
-        "Cache-Control": "public, max-age=300",
+        "Cache-Control": "public, max-age=60, must-revalidate",
         "Access-Control-Allow-Origin": "*",
       },
     });

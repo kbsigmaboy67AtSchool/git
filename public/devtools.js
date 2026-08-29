@@ -2,7 +2,7 @@
   "use strict";
 
   /*
-   * n3xn DevTools — right sidebar, pushes page left
+   * n3xn DevTools — ChromeOS-style bottom dock
    * + blob URL cloaking
    * + reliable layout for Monaco
    */
@@ -13,13 +13,15 @@
   const DB_NAME = `${NS}db`;
   const DB_STORE = `${NS}state`;
 
-  const RAW_BASE =
-    "https://raw.githubusercontent.com/kbsigmaboy67AtSchool/git/main/public/";
-  const CSS_URL = `${RAW_BASE}devtools.css`;
+  // Prefer same-origin proxy (correct MIME). Fall back to jsDelivr.
+  // NEVER use raw.githubusercontent.com — it is text/plain + nosniff and will not run/load as assets.
+  const CSS_URL = "/devtools.css";
+  const CSS_FALLBACK =
+    "https://cdn.jsdelivr.net/gh/kbsigmaboy67AtSchool/git@main/public/devtools.css";
   const MONACO_LOADER =
     "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js";
 
-  const DEFAULT_WIDTH = 420;
+  const DEFAULT_HEIGHT = Math.round(window.innerHeight * 0.4);
 
   const state = {
     enabled: true,
@@ -29,7 +31,7 @@
     cloakFavicon: null,
     scripts: [],
     devAuthenticated: false,
-    sidebarWidth: DEFAULT_WIDTH,
+    dockHeight: null,
     open: false,
   };
 
@@ -100,6 +102,10 @@
     link.id = `${NS}css`;
     link.rel = "stylesheet";
     link.href = CSS_URL;
+    link.onerror = () => {
+      link.onerror = null;
+      link.href = CSS_FALLBACK;
+    };
     document.head.appendChild(link);
   }
 
@@ -935,18 +941,18 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
 
   /* ── Open / close sidebar (pushes page) ── */
 
-  function setSidebarWidth(px) {
-    const w = Math.max(280, Math.min(window.innerWidth - 80, px));
-    state.sidebarWidth = w;
-    document.documentElement.style.setProperty("--n3xn-sidebar-width", w + "px");
-    if (root) root.style.width = w + "px";
+  function setDockHeight(px) {
+    const h = Math.max(160, Math.min(window.innerHeight * 0.9, px));
+    state.dockHeight = h;
+    document.documentElement.style.setProperty("--n3xn-dt-height", h + "px");
+    if (root) root.style.height = h + "px";
   }
 
   function openPanel() {
     state.open = true;
     root.setAttribute("data-open", "");
-    document.documentElement.classList.add("n3xn-devtools-open");
-    setSidebarWidth(state.sidebarWidth || DEFAULT_WIDTH);
+    document.documentElement.classList.add("n3xn-dt-open");
+    setDockHeight(state.dockHeight || DEFAULT_HEIGHT);
     activateTab(currentTab);
     saveState();
   }
@@ -954,7 +960,7 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
   function closePanel() {
     state.open = false;
     root.removeAttribute("data-open");
-    document.documentElement.classList.remove("n3xn-devtools-open");
+    document.documentElement.classList.remove("n3xn-dt-open");
     hideHighlight();
     if (editor) {
       try { editor.dispose(); } catch {}
@@ -972,21 +978,21 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
   /* ── Resize handle ── */
 
   function setupResize(handle) {
-    let startX = 0;
-    let startW = 0;
+    let startY = 0;
+    let startH = 0;
 
     handle.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
-      startX = e.clientX;
-      startW = state.sidebarWidth || DEFAULT_WIDTH;
+      startY = e.clientY;
+      startH = state.dockHeight || DEFAULT_HEIGHT;
       handle.setAttribute("data-active", "");
       handle.setPointerCapture(e.pointerId);
 
       const onMove = (ev) => {
-        // Dragging left edge: moving left increases width
-        const dx = startX - ev.clientX;
-        setSidebarWidth(startW + dx);
+        // Drag top edge: moving up increases height
+        const dy = startY - ev.clientY;
+        setDockHeight(startH + dy);
         if (editor && editorReady) {
           try { editor.layout(); } catch {}
         }
@@ -1027,8 +1033,8 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
 
     // CSS variable for page push
     document.documentElement.style.setProperty(
-      "--n3xn-sidebar-width",
-      (state.sidebarWidth || DEFAULT_WIDTH) + "px",
+      "--n3xn-dt-height",
+      (state.dockHeight || DEFAULT_HEIGHT) + "px",
     );
 
     root = el("div", { id: `${NS}root`, className: `${NS}root` });
@@ -1046,19 +1052,6 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
     setupResize(resizeHandle);
 
     const titlebar = el("div", { className: `${NS}titlebar` });
-    const title = el("span", { className: `${NS}title` });
-    title.innerHTML = `<b>n3xn</b> DevTools`;
-    const cloakBtn = el("button", {
-      className: `${NS}title-button`,
-      type: "button",
-      title: "Open blob cloaked",
-    }, "⧉");
-    const close = el("button", {
-      className: `${NS}title-button`,
-      type: "button",
-      title: "Close",
-    }, "×");
-    titlebar.append(title, cloakBtn, close);
 
     const tabbar = el("div", { className: `${NS}tabs` });
     const tabNames = ["Elements", "Console", "Sources", "Network", "Application", "Settings"];
@@ -1075,11 +1068,25 @@ ${favicon ? `<link rel="icon" href="${escapeHTML(favicon)}">` : ""}
       tabbar.appendChild(button);
     }
 
+    const actions = el("div", { className: `${NS}title-actions` });
+    const cloakBtn = el("button", {
+      className: `${NS}title-button`,
+      type: "button",
+      title: "Open blob cloaked",
+    }, "⧉");
+    const close = el("button", {
+      className: `${NS}title-button`,
+      type: "button",
+      title: "Close DevTools",
+    }, "×");
+    actions.append(cloakBtn, close);
+    titlebar.append(tabbar, actions);
+
     content = el("div", { className: `${NS}content` });
     main = el("div", { className: `${NS}main` });
     detail = el("div", { className: `${NS}detail` });
     content.append(main, detail);
-    panel.append(titlebar, tabbar, content);
+    panel.append(titlebar, content);
     root.append(launcher, panel);
     document.documentElement.appendChild(root);
 

@@ -1116,7 +1116,7 @@ ${
     link.rel = "stylesheet";
 
     link.href =
-      "/devtools.css";
+      "https://raw.githubusercontent.com/kbsigmaboy67AtSchool/git/main/public/devtools.css";
 
     document.head.appendChild(
       link,

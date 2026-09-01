@@ -265,29 +265,71 @@
     }
   }
 
-  /* ── Auth ── */
+/* ── Auth ── */
 
-  async function authenticate() {
-    if (state.devAuthenticated) return true;
-    const password = window.prompt("n3xn DevTools password:");
-    if (password === null) return false;
-    try {
-      const response = await fetch("/devtools-auth", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      const result = await response.json();
-      if (response.ok && result.ok) {
-        state.devAuthenticated = true;
-        await saveState();
-        return true;
-      }
-    } catch {}
-    window.alert("DevTools authentication failed.");
-    return false;
+// Client-only authentication.
+// No server request, cookies, CORS, or external dependencies.
+//
+// IMPORTANT:
+// DEVTOOLS_PASSWORD_HASH is the PBKDF2-derived hash of your password.
+// DEVTOOLS_SALT should be unique to this application.
+
+const DEVTOOLS_SALT = "n3xn-devtools-auth-v1-906050ruor67ob6b8ttn6";
+const DEVTOOLS_PASSWORD_HASH =
+  "fb1d23dcc7edcdc29cbb4a31212e124ff6fc45d77123bb4608b69dd0f89b1d38";
+
+const DEVTOOLS_ITERATIONS = 150000;
+
+async function hashDevToolsPassword(password) {
+  const encoder = new TextEncoder();
+
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    {
+      name: "PBKDF2",
+    },
+    false,
+    ["deriveBits"]
+  );
+
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: encoder.encode(DEVTOOLS_SALT),
+      iterations: DEVTOOLS_ITERATIONS,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    256
+  );
+
+  return Array.from(new Uint8Array(derivedBits))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function authenticate() {
+  if (state.devAuthenticated) return true;
+
+  const password = window.prompt("n3xn DevTools password:");
+  if (password === null) return false;
+
+  try {
+    const hash = await hashDevToolsPassword(password);
+
+    if (hash === DEVTOOLS_PASSWORD_HASH) {
+      state.devAuthenticated = true;
+      await saveState();
+      return true;
+    }
+  } catch (err) {
+    console.warn("n3xn DevTools authentication error:", err);
   }
+
+  window.alert("DevTools authentication failed.");
+  return false;
+}
 
   /* ── Monaco ── */
 
